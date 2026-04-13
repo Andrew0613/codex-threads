@@ -4,6 +4,44 @@
 
 It is designed for the workflow described in Nick Baumann's post: find an old thread, resolve the right session id, then read the cleaned conversation or recent event stream without handing the raw archive back to Codex every time.
 
+`insights` also turns those local archives into a structured backend for model-written usage reports, so you can ask another agent to summarize how you've been using Codex without re-parsing raw session logs every time.
+
+## Who This Is For
+
+This tool is useful if you:
+
+- use Codex regularly and already have local session archives under `~/.codex/sessions`
+- want fast local search over old threads
+- want deterministic thread summaries and event recaps
+- want a machine-readable `insights` payload that another agent can turn into a report
+
+If you do not have a local Codex archive yet, this repo will still build, but the commands will not have anything interesting to index.
+
+## Quickstart
+
+Install:
+
+```bash
+git clone git@github.com:Andrew0613/codex-threads.git
+cd codex-threads
+make install-local
+```
+
+Then run:
+
+```bash
+codex-threads --json doctor
+codex-threads --json sync
+codex-threads --json threads recent --limit 10
+codex-threads --json insights --limit 20
+```
+
+If your shell does not already include `~/.local/bin`, add it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 ## What It Does
 
 - `codex-threads --json sync`
@@ -31,11 +69,24 @@ It is designed for the workflow described in Nick Baumann's post: find an old th
 
 ## Install
 
+Requirements:
+
+- Rust toolchain
+- local Codex session archives in `~/.codex/sessions`
+
+From source:
+
 ```bash
 make install-local
 ```
 
 That installs the binary into `~/.local/bin`.
+
+You can also run it without installing:
+
+```bash
+cargo run -- --json doctor
+```
 
 ## Usage
 
@@ -77,6 +128,46 @@ On failure:
 }
 ```
 
+## Best First Commands
+
+If you are trying this repo for the first time, these four commands give the fastest signal:
+
+```bash
+codex-threads --json doctor
+codex-threads --json sync
+codex-threads --json messages search "your keyword" --limit 10
+codex-threads --json insights --limit 20
+```
+
+The last command writes an HTML report to the default insights output path unless you override it with `--output`.
+
+## Using `insights` With Another Agent
+
+The intended contract for agent consumption is:
+
+1. `data.source_contract`
+2. `data.trace`
+3. `data.briefing`
+4. `data.heuristic_draft`
+
+In other words:
+
+- `trace` and `briefing` are the canonical fact layer
+- `metadata` and `aggregated` are overview helpers
+- `heuristic_draft` is wording/reference only
+
+This matters if you want to use `codex-threads` as a backend for a separate Codex or Claude agent that writes the final narrative report.
+
+## Privacy
+
+`codex-threads` is local-first:
+
+- it reads from your local `~/.codex/sessions`
+- it writes a local SQLite index under `~/.codex/codex-threads`
+- it writes local HTML insights reports unless you choose another output path
+
+It does not upload your sessions anywhere by itself.
+
 ## Notes
 
 - The index lives at `~/.codex/codex-threads/index.sqlite3` by default.
@@ -90,3 +181,7 @@ On failure:
 - `messages search` is snippet-first by default so long pasted prompts do not dominate the result list.
 - `events summary` keeps command completions, meaningful tool edits, and failures while suppressing token counts, reasoning, and most raw tool output.
 - This first version prefers a boring contract over perfect ranking. The important property is that it is deterministic, scriptable, and fast enough to reuse from future Codex threads.
+
+## License
+
+MIT
