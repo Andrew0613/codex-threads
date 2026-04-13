@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -70,6 +70,7 @@ struct Cli {
 enum Command {
     Sync,
     Doctor,
+    Insights(InsightsArgs),
     Messages {
         #[command(subcommand)]
         command: MessagesCommand,
@@ -94,11 +95,14 @@ enum ThreadsCommand {
     Resolve(SearchArgs),
     Recent(RecentThreadsArgs),
     Read(ReadThreadArgs),
+    Summarize(SummarizeThreadArgs),
+    Insight(SummarizeThreadArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum EventsCommand {
     Read(ReadEventsArgs),
+    Summary(ReadEventsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -121,6 +125,35 @@ struct ReadThreadArgs {
 
     #[arg(long)]
     raw: bool,
+}
+
+#[derive(Debug, Args)]
+struct SummarizeThreadArgs {
+    session_id: String,
+
+    #[arg(long, default_value_t = 120)]
+    event_limit: usize,
+
+    #[arg(long, default_value_t = 1600)]
+    max_message_chars: usize,
+}
+
+#[derive(Debug, Args)]
+struct InsightsArgs {
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+
+    #[arg(long)]
+    project: Option<String>,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    #[arg(long, default_value_t = 120)]
+    event_limit: usize,
+
+    #[arg(long, default_value_t = 1600)]
+    max_message_chars: usize,
 }
 
 #[derive(Debug, Args)]
@@ -171,7 +204,8 @@ struct SearchMessageResult {
     timestamp: Option<String>,
     role: String,
     phase: Option<String>,
-    text: String,
+    summary: Option<String>,
+    snippet: String,
     cwd: Option<String>,
     path: String,
 }
@@ -213,6 +247,101 @@ struct RecentThreadResult {
     event_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ThreadDigest {
+    thread: ThreadSummary,
+    objective: Option<String>,
+    key_requests: Vec<String>,
+    key_actions: Vec<EventSummaryItem>,
+    outcome: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ThreadInsight {
+    thread: ThreadSummary,
+    title: String,
+    summary: String,
+    insights: Vec<String>,
+    evidence: Vec<String>,
+    next_steps: Vec<String>,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InsightsMetadata {
+    sessions_scanned: usize,
+    sessions_analyzed: usize,
+    project_filter: Option<String>,
+    generated_report_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AtAGlance {
+    whats_working: String,
+    whats_hindering: String,
+    quick_wins: String,
+    ambitious_workflows: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkArea {
+    name: String,
+    session_count: usize,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InteractionStyle {
+    narrative: String,
+    key_pattern: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InsightCard {
+    title: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FrictionCard {
+    category: String,
+    detail: String,
+    examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SuggestionCard {
+    title: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InsightsReport {
+    metadata: InsightsMetadata,
+    at_a_glance: AtAGlance,
+    work_areas: Vec<WorkArea>,
+    interaction_style: InteractionStyle,
+    what_works: Vec<InsightCard>,
+    friction: Vec<FrictionCard>,
+    suggestions: Vec<SuggestionCard>,
+    on_the_horizon: Vec<String>,
+    evidence: Vec<String>,
+    content: String,
+}
+
+#[derive(Debug, Clone)]
+struct SessionFact {
+    thread: ThreadSummary,
+    objective: Option<String>,
+    outcome: Option<String>,
+    key_requests: Vec<String>,
+    key_actions: Vec<EventSummaryItem>,
+    substantive_user_messages: usize,
+    cleaned_context_messages: usize,
+    command_successes: usize,
+    command_failures: usize,
+}
+
 #[derive(Debug, Clone)]
 struct ThreadResolveCandidate {
     thread_id: String,
@@ -240,6 +369,13 @@ struct EventItem {
     event_type: Option<String>,
     summary: Option<String>,
     payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct EventSummaryItem {
+    timestamp: Option<String>,
+    category: String,
+    detail: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,6 +425,7 @@ fn run(cli: Cli) -> Result<RenderedOutput> {
     match cli.command {
         Command::Sync => render_sync(sync_index(&mut conn, &sessions_root, &db_path)?),
         Command::Doctor => render_doctor(run_doctor(&conn, &sessions_root, &db_path)?),
+        Command::Insights(args) => render_global_insights(generate_global_insights(&conn, &args)?),
         Command::Messages { command } => match command {
             MessagesCommand::Search(args) => {
                 render_messages_search(search_messages(&conn, &args.query, args.limit)?)
@@ -306,10 +443,25 @@ fn run(cli: Cli) -> Result<RenderedOutput> {
                 !args.raw,
                 args.max_message_chars,
             )?),
+            ThreadsCommand::Summarize(args) => render_thread_summary(summarize_thread(
+                &conn,
+                &args.session_id,
+                args.event_limit,
+                args.max_message_chars,
+            )?),
+            ThreadsCommand::Insight(args) => render_thread_insight(thread_insight(
+                &conn,
+                &args.session_id,
+                args.event_limit,
+                args.max_message_chars,
+            )?),
         },
         Command::Events { command } => match command {
             EventsCommand::Read(args) => {
                 render_events_read(read_events(&conn, &args.session_id, args.limit)?)
+            }
+            EventsCommand::Summary(args) => {
+                render_events_summary(summarize_events(&conn, &args.session_id, args.limit)?)
             }
         },
     }
@@ -380,7 +532,10 @@ fn render_messages_search(results: Vec<SearchMessageResult>) -> Result<RenderedO
         if let Some(cwd) = &item.cwd {
             writeln!(&mut text, "   cwd: {}", cwd)?;
         }
-        writeln!(&mut text, "   {}", one_line(&item.text, 240))?;
+        if let Some(summary) = &item.summary {
+            writeln!(&mut text, "   thread: {}", one_line(summary, 180))?;
+        }
+        writeln!(&mut text, "   match: {}", item.snippet)?;
     }
 
     if results.is_empty() {
@@ -507,6 +662,66 @@ fn render_thread_read(payload: (ThreadSummary, Vec<ThreadMessage>)) -> Result<Re
     })
 }
 
+fn render_thread_summary(digest: ThreadDigest) -> Result<RenderedOutput> {
+    let mut text = String::new();
+    writeln!(&mut text, "Thread: {}", digest.thread.thread_id)?;
+    if let Some(started_at) = &digest.thread.started_at {
+        writeln!(&mut text, "Started: {}", started_at)?;
+    }
+    if let Some(cwd) = &digest.thread.cwd {
+        writeln!(&mut text, "CWD: {}", cwd)?;
+    }
+    if let Some(objective) = &digest.objective {
+        writeln!(&mut text, "Objective: {}", objective)?;
+    }
+    if !digest.key_requests.is_empty() {
+        writeln!(&mut text, "Requests:")?;
+        for request in &digest.key_requests {
+            writeln!(&mut text, "- {}", request)?;
+        }
+    }
+    if !digest.key_actions.is_empty() {
+        writeln!(&mut text, "Actions:")?;
+        for action in &digest.key_actions {
+            writeln!(&mut text, "- [{}] {}", action.category, action.detail)?;
+        }
+    }
+    if let Some(outcome) = &digest.outcome {
+        writeln!(&mut text, "Outcome: {}", outcome)?;
+    }
+
+    Ok(RenderedOutput {
+        text,
+        json: json!({
+            "ok": true,
+            "command": "threads.summarize",
+            "data": digest,
+        }),
+    })
+}
+
+fn render_thread_insight(insight: ThreadInsight) -> Result<RenderedOutput> {
+    Ok(RenderedOutput {
+        text: insight.content.clone(),
+        json: json!({
+            "ok": true,
+            "command": "threads.insight",
+            "data": insight,
+        }),
+    })
+}
+
+fn render_global_insights(report: InsightsReport) -> Result<RenderedOutput> {
+    Ok(RenderedOutput {
+        text: report.content.clone(),
+        json: json!({
+            "ok": true,
+            "command": "insights",
+            "data": report,
+        }),
+    })
+}
+
 fn render_events_read(payload: (ThreadSummary, Vec<EventItem>)) -> Result<RenderedOutput> {
     let (thread, events) = payload;
     let mut text = String::new();
@@ -536,6 +751,36 @@ fn render_events_read(payload: (ThreadSummary, Vec<EventItem>)) -> Result<Render
         json: json!({
             "ok": true,
             "command": "events.read",
+            "data": {
+                "thread": thread,
+                "events": events,
+            }
+        }),
+    })
+}
+
+fn render_events_summary(payload: (ThreadSummary, Vec<EventSummaryItem>)) -> Result<RenderedOutput> {
+    let (thread, events) = payload;
+    let mut text = String::new();
+    writeln!(&mut text, "Thread: {}", thread.thread_id)?;
+    writeln!(&mut text, "Summary Events: {}", events.len())?;
+
+    for event in &events {
+        text.push('\n');
+        writeln!(
+            &mut text,
+            "[{}] {}",
+            event.timestamp.as_deref().unwrap_or("unknown-time"),
+            event.category
+        )?;
+        writeln!(&mut text, "{}", event.detail)?;
+    }
+
+    Ok(RenderedOutput {
+        text,
+        json: json!({
+            "ok": true,
+            "command": "events.summary",
             "data": {
                 "thread": thread,
                 "events": events,
@@ -723,6 +968,7 @@ fn search_messages(
     limit: usize,
 ) -> Result<Vec<SearchMessageResult>> {
     let normalized = normalize_query(query);
+    let snippet_query = compact_whitespace(query).to_lowercase();
     let mut stmt = conn.prepare(
         r#"
         SELECT
@@ -731,6 +977,7 @@ fn search_messages(
             m.role,
             m.phase,
             m.text,
+            t.summary,
             t.cwd,
             t.path
         FROM messages m
@@ -742,14 +989,22 @@ fn search_messages(
     )?;
 
     let rows = stmt.query_map(params![normalized, limit as i64], |row| {
+        let text: String = row.get(4)?;
+        let cleaned_text = clean_search_text(&text, 600);
+        let snippet_source = if cleaned_text.to_lowercase().contains(&snippet_query) {
+            cleaned_text.as_str()
+        } else {
+            text.as_str()
+        };
         Ok(SearchMessageResult {
             thread_id: row.get(0)?,
             timestamp: row.get(1)?,
             role: row.get(2)?,
             phase: row.get(3)?,
-            text: row.get(4)?,
-            cwd: row.get(5)?,
-            path: row.get(6)?,
+            summary: row.get(5)?,
+            snippet: build_search_snippet(snippet_source, &snippet_query, 180),
+            cwd: row.get(6)?,
+            path: row.get(7)?,
         })
     })?;
 
@@ -969,6 +1224,1061 @@ fn read_events(
     let mut events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     events.reverse();
     Ok((thread, events))
+}
+
+fn summarize_events(
+    conn: &Connection,
+    session_id: &str,
+    limit: usize,
+) -> Result<(ThreadSummary, Vec<EventSummaryItem>)> {
+    let (thread, events) = read_events(conn, session_id, limit)?;
+    Ok((thread, summarize_event_stream(&events)))
+}
+
+fn summarize_thread(
+    conn: &Connection,
+    session_id: &str,
+    event_limit: usize,
+    max_message_chars: usize,
+) -> Result<ThreadDigest> {
+    let (thread, messages) = read_thread(conn, session_id, None, true, max_message_chars)?;
+    let (_, events) = summarize_events(conn, session_id, event_limit)?;
+    Ok(build_thread_digest(thread, messages, events))
+}
+
+fn thread_insight(
+    conn: &Connection,
+    session_id: &str,
+    event_limit: usize,
+    max_message_chars: usize,
+) -> Result<ThreadInsight> {
+    let digest = summarize_thread(conn, session_id, event_limit, max_message_chars)?;
+    Ok(build_thread_insight(digest))
+}
+
+fn build_thread_digest(
+    thread: ThreadSummary,
+    messages: Vec<ThreadMessage>,
+    events: Vec<EventSummaryItem>,
+) -> ThreadDigest {
+    let objective = messages
+        .iter()
+        .find(|message| message.role == "user" && is_substantive_message(&message.text))
+        .map(|message| one_line(&message.text, 220))
+        .or_else(|| thread.summary.as_ref().map(|summary| one_line(summary, 220)));
+
+    let objective_normalized = objective
+        .as_ref()
+        .map(|text| normalize_summary_value(text))
+        .unwrap_or_default();
+
+    let mut key_requests = Vec::new();
+    for message in messages.iter().filter(|message| message.role == "user") {
+        let line = one_line(&message.text, 220);
+        if !is_substantive_message(&line) {
+            continue;
+        }
+        if normalize_summary_value(&line) == objective_normalized {
+            continue;
+        }
+        push_unique(&mut key_requests, line, 4);
+    }
+
+    let outcome = messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == "assistant"
+                && message.phase.as_deref() == Some("final_answer")
+                && is_substantive_message(&message.text)
+        })
+        .or_else(|| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant" && is_substantive_message(&message.text))
+        })
+        .map(|message| one_line(&message.text, 280));
+
+    let key_actions = events
+        .into_iter()
+        .filter(|event| event.category != "suppressed" && event.category != "message")
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    ThreadDigest {
+        thread,
+        objective,
+        key_requests,
+        key_actions,
+        outcome,
+    }
+}
+
+fn build_thread_insight(digest: ThreadDigest) -> ThreadInsight {
+    let title = build_insight_title(&digest);
+    let summary = build_insight_summary(&digest);
+    let insights = derive_insight_points(&digest);
+    let evidence = build_insight_evidence(&digest);
+    let next_steps = derive_next_steps(&digest, &insights);
+    let content = render_insight_content(&title, &summary, &insights, &evidence, &next_steps);
+
+    ThreadInsight {
+        thread: digest.thread,
+        title,
+        summary,
+        insights,
+        evidence,
+        next_steps,
+        content,
+    }
+}
+
+fn generate_global_insights(conn: &Connection, args: &InsightsArgs) -> Result<InsightsReport> {
+    let candidate_threads = candidate_threads_for_insights(conn, args)?;
+    let sessions_scanned = candidate_threads.len();
+    let mut facts = Vec::new();
+
+    for thread in candidate_threads {
+        if let Some(fact) = build_session_fact(conn, thread, args.event_limit, args.max_message_chars)?
+        {
+            facts.push(fact);
+        }
+    }
+
+    facts = select_insight_facts(facts, args);
+
+    if facts.is_empty() {
+        bail!("no analyzable sessions found for insights");
+    }
+
+    let report_path = args
+        .output
+        .clone()
+        .unwrap_or_else(default_insights_report_path);
+    let report = build_global_insights_report(&facts, sessions_scanned, args.project.clone(), &report_path);
+    write_insights_report_html(&report_path, &report)?;
+    Ok(report)
+}
+
+fn candidate_threads_for_insights(
+    conn: &Connection,
+    args: &InsightsArgs,
+) -> Result<Vec<ThreadSummary>> {
+    let project_filter = args.project.as_ref().map(|value| normalize_query(value));
+    let fetch_limit = if args.project.is_some() {
+        args.limit
+    } else {
+        args.limit.saturating_mul(4).clamp(args.limit, 200)
+    };
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT thread_id, path, started_at, cwd, project_name, summary, originator, cli_version, model_provider, agent_nickname, agent_role, message_count, event_count
+        FROM threads
+        WHERE (?1 IS NULL OR lower(COALESCE(project_name, '')) = ?1)
+        ORDER BY started_at DESC
+        LIMIT ?2
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![project_filter, fetch_limit as i64], |row| {
+        Ok(ThreadSummary {
+            thread_id: row.get(0)?,
+            path: row.get(1)?,
+            started_at: row.get(2)?,
+            cwd: row.get(3)?,
+            project_name: row.get(4)?,
+            summary: row.get(5)?,
+            originator: row.get(6)?,
+            cli_version: row.get(7)?,
+            model_provider: row.get(8)?,
+            agent_nickname: row.get(9)?,
+            agent_role: row.get(10)?,
+            message_count: row.get::<_, i64>(11)? as usize,
+            event_count: row.get::<_, i64>(12)? as usize,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn build_session_fact(
+    conn: &Connection,
+    thread: ThreadSummary,
+    event_limit: usize,
+    max_message_chars: usize,
+) -> Result<Option<SessionFact>> {
+    let (_, messages) = read_thread(conn, &thread.thread_id, None, true, max_message_chars)?;
+    let (_, events) = summarize_events(conn, &thread.thread_id, event_limit)?;
+
+    let substantive_user_messages = messages
+        .iter()
+        .filter(|message| message.role == "user" && is_substantive_message(&message.text))
+        .count();
+    let cleaned_context_messages = messages.iter().filter(|message| message.cleaned).count();
+    let command_successes = events
+        .iter()
+        .filter(|event| event.category == "command")
+        .count();
+    let command_failures = events.iter().filter(|event| event.category == "error").count();
+
+    if substantive_user_messages == 0 {
+        return Ok(None);
+    }
+    if thread.message_count < 3 && command_successes == 0 && command_failures == 0 {
+        return Ok(None);
+    }
+
+    let digest = build_thread_digest(thread.clone(), messages, events);
+    Ok(Some(SessionFact {
+        thread,
+        objective: digest.objective,
+        outcome: digest.outcome,
+        key_requests: digest.key_requests,
+        key_actions: digest.key_actions,
+        substantive_user_messages,
+        cleaned_context_messages,
+        command_successes,
+        command_failures,
+    }))
+}
+
+fn select_insight_facts(mut facts: Vec<SessionFact>, args: &InsightsArgs) -> Vec<SessionFact> {
+    if facts.len() <= args.limit {
+        return facts;
+    }
+
+    if args.project.is_some() {
+        facts.truncate(args.limit);
+        return facts;
+    }
+
+    let mut buckets: HashMap<String, VecDeque<SessionFact>> = HashMap::new();
+    let mut order = Vec::new();
+    for fact in facts {
+        let project = session_project_name(&fact);
+        if !buckets.contains_key(&project) {
+            order.push(project.clone());
+        }
+        buckets.entry(project).or_default().push_back(fact);
+    }
+
+    let mut selected = Vec::new();
+    while selected.len() < args.limit {
+        let mut made_progress = false;
+        for project in &order {
+            if selected.len() >= args.limit {
+                break;
+            }
+            if let Some(fact) = buckets.get_mut(project).and_then(VecDeque::pop_front) {
+                selected.push(fact);
+                made_progress = true;
+            }
+        }
+
+        if !made_progress {
+            break;
+        }
+    }
+
+    selected
+}
+
+fn build_global_insights_report(
+    facts: &[SessionFact],
+    sessions_scanned: usize,
+    project_filter: Option<String>,
+    report_path: &Path,
+) -> InsightsReport {
+    let work_areas = build_work_areas(facts);
+    let interaction_style = build_interaction_style(facts, &work_areas);
+    let what_works = build_what_works(facts, &work_areas);
+    let friction = build_friction_cards(facts);
+    let suggestions = build_suggestion_cards(facts, &work_areas, &friction);
+    let on_the_horizon = build_horizon_items(facts, &work_areas);
+    let evidence = build_global_evidence(facts);
+    let at_a_glance =
+        build_at_a_glance(facts, &work_areas, &interaction_style, &friction, &suggestions);
+    let metadata = InsightsMetadata {
+        sessions_scanned,
+        sessions_analyzed: facts.len(),
+        project_filter,
+        generated_report_path: report_path.display().to_string(),
+    };
+    let content = render_global_insights_content(
+        &metadata,
+        &at_a_glance,
+        &work_areas,
+        &interaction_style,
+        &what_works,
+        &friction,
+        &suggestions,
+        &on_the_horizon,
+        &evidence,
+    );
+
+    InsightsReport {
+        metadata,
+        at_a_glance,
+        work_areas,
+        interaction_style,
+        what_works,
+        friction,
+        suggestions,
+        on_the_horizon,
+        evidence,
+        content,
+    }
+}
+
+fn build_work_areas(facts: &[SessionFact]) -> Vec<WorkArea> {
+    let mut grouped: HashMap<String, Vec<&SessionFact>> = HashMap::new();
+    for fact in facts {
+        grouped
+            .entry(session_project_name(fact))
+            .or_default()
+            .push(fact);
+    }
+
+    let mut areas = grouped
+        .into_iter()
+        .map(|(name, group)| {
+            let mut examples = Vec::new();
+            for fact in &group {
+                if let Some(objective) = &fact.objective {
+                    push_unique(&mut examples, one_line(objective, 120), 2);
+                } else if let Some(summary) = &fact.thread.summary {
+                    push_unique(&mut examples, one_line(summary, 120), 2);
+                }
+            }
+            let description = if examples.is_empty() {
+                format!("{} recent sessions in this area.", group.len())
+            } else {
+                format!(
+                    "{} recent sessions focused on {}.",
+                    group.len(),
+                    examples.join(" / ")
+                )
+            };
+            WorkArea {
+                name,
+                session_count: group.len(),
+                description,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    areas.sort_by(|left, right| {
+        right
+            .session_count
+            .cmp(&left.session_count)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    areas.truncate(5);
+    areas
+}
+
+fn build_interaction_style(facts: &[SessionFact], work_areas: &[WorkArea]) -> InteractionStyle {
+    let total = facts.len().max(1);
+    let iterative_sessions = facts
+        .iter()
+        .filter(|fact| fact.substantive_user_messages >= 2)
+        .count();
+    let command_heavy_sessions = facts
+        .iter()
+        .filter(|fact| fact.command_successes + fact.command_failures >= 2)
+        .count();
+    let context_heavy_sessions = facts
+        .iter()
+        .filter(|fact| fact.cleaned_context_messages > 0)
+        .count();
+    let dominant_area = work_areas.first().map(|area| area.session_count).unwrap_or(0);
+    let dominant_share = dominant_area as f64 / total as f64;
+
+    let mut sentences = Vec::new();
+    let key_pattern = if iterative_sessions * 2 >= total {
+        "You tend to refine work inside the same thread instead of restarting from scratch."
+            .to_owned()
+    } else if dominant_share >= 0.6 {
+        "You usually stay anchored on one project until the thread produces a concrete result."
+            .to_owned()
+    } else {
+        "You use Codex across multiple threads and projects, then come back to tighten the ones that matter."
+            .to_owned()
+    };
+    sentences.push(key_pattern.clone());
+
+    if command_heavy_sessions * 2 >= total {
+        sentences.push(
+            "Your sessions are operational, not just conversational: builds, installs, searches, and checks are part of how you validate progress."
+                .to_owned(),
+        );
+    }
+    if context_heavy_sessions * 3 >= total {
+        sentences.push(
+            "You frequently inject dense reference context, which makes cleanup, collapsing, and summary layers important to keep the thread reusable."
+                .to_owned(),
+        );
+    }
+    if dominant_share >= 0.6 {
+        let area_name = work_areas
+            .first()
+            .map(|area| area.name.as_str())
+            .unwrap_or("one project");
+        sentences.push(format!(
+            "Recent usage is concentrated around {area_name}, suggesting you prefer going deep on one active system before switching context."
+        ));
+    } else if work_areas.len() > 1 {
+        sentences.push(
+            "Recent usage spans multiple work areas, so cross-thread summaries need to separate project-specific patterns from global habits."
+                .to_owned(),
+        );
+    }
+
+    InteractionStyle {
+        narrative: sentences.join(" "),
+        key_pattern,
+    }
+}
+
+fn build_what_works(facts: &[SessionFact], work_areas: &[WorkArea]) -> Vec<InsightCard> {
+    let total = facts.len().max(1);
+    let with_outcomes = facts.iter().filter(|fact| fact.outcome.is_some()).count();
+    let command_sessions = facts
+        .iter()
+        .filter(|fact| fact.command_successes > 0)
+        .count();
+    let iterative_sessions = facts
+        .iter()
+        .filter(|fact| fact.substantive_user_messages >= 2)
+        .count();
+
+    let mut cards = Vec::new();
+    if command_sessions > 0 {
+        cards.push(InsightCard {
+            title: "You validate work with real commands".to_owned(),
+            detail: format!(
+                "{} of {} analyzed sessions included successful command execution, which keeps the conversation tied to observable results instead of speculation.",
+                command_sessions, total
+            ),
+        });
+    }
+    if iterative_sessions > 0 {
+        cards.push(InsightCard {
+            title: "You improve results by iterating in-thread".to_owned(),
+            detail: format!(
+                "{} sessions contained substantive follow-up requests, showing that your best outcomes come from tightening the same thread rather than throwing it away.",
+                iterative_sessions
+            ),
+        });
+    }
+    if with_outcomes > 0 {
+        cards.push(InsightCard {
+            title: "Threads often end in a concrete deliverable".to_owned(),
+            detail: format!(
+                "{} analyzed sessions ended with a detectable assistant outcome, which means your history contains reusable conclusions rather than only partial exploration.",
+                with_outcomes
+            ),
+        });
+    }
+    if cards.is_empty() {
+        cards.push(InsightCard {
+            title: "Your history already contains reusable signals".to_owned(),
+            detail: "Even without explicit success markers everywhere, the session archive still captures repeatable goals, actions, and outcomes that can be turned into guidance.".to_owned(),
+        });
+    }
+    if let Some(area) = work_areas.first() {
+        cards.push(InsightCard {
+            title: "Project concentration creates stronger memory".to_owned(),
+            detail: format!(
+                "The busiest recent area is {}, which makes it easier to detect repeated patterns and extract project-specific workflows.",
+                area.name
+            ),
+        });
+    }
+    cards.truncate(4);
+    cards
+}
+
+fn build_friction_cards(facts: &[SessionFact]) -> Vec<FrictionCard> {
+    let mut cards = Vec::new();
+    let failed_sessions = facts
+        .iter()
+        .filter(|fact| fact.command_failures > 0)
+        .collect::<Vec<_>>();
+    if !failed_sessions.is_empty() {
+        let mut examples = Vec::new();
+        for fact in &failed_sessions {
+            for action in fact.key_actions.iter().filter(|action| action.category == "error") {
+                push_unique(&mut examples, one_line(&action.detail, 160), 3);
+            }
+        }
+        cards.push(FrictionCard {
+            category: "Execution friction".to_owned(),
+            detail: format!(
+                "{} analyzed sessions contained failed commands or tool-level errors, which means environment and validation issues still leak into the workflow.",
+                failed_sessions.len()
+            ),
+            examples,
+        });
+    }
+
+    let context_heavy_sessions = facts
+        .iter()
+        .filter(|fact| fact.cleaned_context_messages > 0)
+        .collect::<Vec<_>>();
+    if !context_heavy_sessions.is_empty() {
+        let mut examples = Vec::new();
+        for fact in context_heavy_sessions.iter().take(3) {
+            if let Some(objective) = &fact.objective {
+                push_unique(&mut examples, one_line(objective, 160), 3);
+            }
+        }
+        cards.push(FrictionCard {
+            category: "Context overload".to_owned(),
+            detail: format!(
+                "{} sessions required collapsing pasted context or oversized payloads, which makes raw transcripts harder to reuse without cleanup layers.",
+                context_heavy_sessions.len()
+            ),
+            examples,
+        });
+    }
+
+    let weak_outcome_sessions = facts
+        .iter()
+        .filter(|fact| fact.outcome.is_none())
+        .count();
+    if weak_outcome_sessions * 2 >= facts.len().max(1) {
+        cards.push(FrictionCard {
+            category: "Soft thread endings".to_owned(),
+            detail: "Many sessions do not end with a crisp final-answer outcome, so retrospective analysis has to infer completion from indirect signals.".to_owned(),
+            examples: Vec::new(),
+        });
+    }
+
+    cards.truncate(3);
+    cards
+}
+
+fn build_suggestion_cards(
+    facts: &[SessionFact],
+    work_areas: &[WorkArea],
+    friction: &[FrictionCard],
+) -> Vec<SuggestionCard> {
+    let mut suggestions = Vec::new();
+    let context_heavy_sessions = facts
+        .iter()
+        .filter(|fact| fact.cleaned_context_messages > 0)
+        .count();
+    if context_heavy_sessions > 0 {
+        suggestions.push(SuggestionCard {
+            title: "Keep context folded by default".to_owned(),
+            detail: "Recent usage shows that long pasted references are common. Preserve compact snippets and collapsed payload markers so global reports stay readable.".to_owned(),
+        });
+    }
+    if work_areas.len() > 1 {
+        let area = work_areas
+            .first()
+            .map(|item| item.name.as_str())
+            .unwrap_or("project");
+        suggestions.push(SuggestionCard {
+            title: "Run insights per project when needed".to_owned(),
+            detail: format!(
+                "Your recent usage spans multiple work areas. Use `codex-threads insights --project {area}` when you want a cleaner project-specific report."
+            ),
+        });
+    }
+    if friction.iter().any(|item| item.category == "Execution friction") {
+        suggestions.push(SuggestionCard {
+            title: "Capture preflight checks for recurring command flows".to_owned(),
+            detail: "Failed commands are one of the clearest friction signals. Turning setup checks into a repeatable preflight reduces wasted retries.".to_owned(),
+        });
+    }
+    suggestions.push(SuggestionCard {
+        title: "Promote repeated good threads into reusable patterns".to_owned(),
+        detail: "When a thread repeatedly follows the same path from request to validation to outcome, preserve that flow as a checklist or automation instead of rediscovering it manually.".to_owned(),
+    });
+    suggestions.truncate(4);
+    suggestions
+}
+
+fn build_horizon_items(facts: &[SessionFact], work_areas: &[WorkArea]) -> Vec<String> {
+    let mut items = Vec::new();
+    if facts.iter().any(|fact| fact.command_successes >= 2) {
+        items.push(
+            "The next step is not just reading old threads but turning recurring execution loops into batch reports, checklists, or automations."
+                .to_owned(),
+        );
+    }
+    if let Some(area) = work_areas.first() {
+        items.push(format!(
+            "Because {} dominates recent work, a future project-specific report can become a durable working memory layer for that codebase.",
+            area.name
+        ));
+    }
+    if items.is_empty() {
+        items.push(
+            "As the archive grows, the most valuable upgrade is moving from single-thread recap to repeated pattern detection across many threads."
+                .to_owned(),
+        );
+    }
+    items
+}
+
+fn build_global_evidence(facts: &[SessionFact]) -> Vec<String> {
+    let mut evidence = Vec::new();
+    for fact in facts.iter().take(6) {
+        if let Some(objective) = &fact.objective {
+            push_unique(
+                &mut evidence,
+                format!("Session objective: {}", one_line(objective, 180)),
+                8,
+            );
+        }
+        if let Some(request) = fact.key_requests.first() {
+            push_unique(
+                &mut evidence,
+                format!("User request: {}", one_line(request, 180)),
+                8,
+            );
+        }
+        if let Some(outcome) = &fact.outcome {
+            push_unique(
+                &mut evidence,
+                format!("Outcome: {}", one_line(outcome, 180)),
+                8,
+            );
+        }
+        for action in fact.key_actions.iter().take(2) {
+            push_unique(
+                &mut evidence,
+                format!("Action: {}", one_line(&action.detail, 180)),
+                8,
+            );
+        }
+    }
+    evidence
+}
+
+fn build_at_a_glance(
+    facts: &[SessionFact],
+    work_areas: &[WorkArea],
+    interaction_style: &InteractionStyle,
+    friction: &[FrictionCard],
+    suggestions: &[SuggestionCard],
+) -> AtAGlance {
+    let total = facts.len().max(1);
+    let with_outcomes = facts.iter().filter(|fact| fact.outcome.is_some()).count();
+    let command_sessions = facts
+        .iter()
+        .filter(|fact| fact.command_successes > 0)
+        .count();
+    let failed_sessions = facts
+        .iter()
+        .filter(|fact| fact.command_failures > 0)
+        .count();
+
+    let dominant_area = work_areas.first().map(|area| area.name.as_str()).unwrap_or("recent work");
+    let hindering = if let Some(card) = friction.first() {
+        card.detail.clone()
+    } else {
+        "The main limitation is that many transcripts still need interpretation before they become reusable guidance.".to_owned()
+    };
+    let quick_win = suggestions
+        .first()
+        .map(|item| item.detail.clone())
+        .unwrap_or_else(|| "Generate project-scoped reports when you want a tighter view of one active codebase.".to_owned());
+
+    AtAGlance {
+        whats_working: format!(
+            "{} {} of {} analyzed sessions ended with a detectable outcome, and {} included successful command execution.",
+            interaction_style.key_pattern, with_outcomes, total, command_sessions
+        ),
+        whats_hindering: if failed_sessions > 0 {
+            format!("{hindering} Failed execution showed up in {failed_sessions} analyzed sessions.")
+        } else {
+            hindering
+        },
+        quick_wins: quick_win,
+        ambitious_workflows: format!(
+            "The strongest future workflow is a reusable report layer around {dominant_area}: repeated threads can become project memory, not just archived transcripts."
+        ),
+    }
+}
+
+fn render_global_insights_content(
+    metadata: &InsightsMetadata,
+    at_a_glance: &AtAGlance,
+    work_areas: &[WorkArea],
+    interaction_style: &InteractionStyle,
+    what_works: &[InsightCard],
+    friction: &[FrictionCard],
+    suggestions: &[SuggestionCard],
+    on_the_horizon: &[String],
+    evidence: &[String],
+) -> String {
+    let mut text = String::new();
+    writeln!(&mut text, "# Codex Insights").expect("write to string");
+    writeln!(
+        &mut text,
+        "\n{} sessions scanned · {} analyzed · report: {}",
+        metadata.sessions_scanned, metadata.sessions_analyzed, metadata.generated_report_path
+    )
+    .expect("write to string");
+
+    writeln!(&mut text, "\n## At a Glance").expect("write to string");
+    writeln!(&mut text, "- **What's working:** {}", at_a_glance.whats_working)
+        .expect("write to string");
+    writeln!(
+        &mut text,
+        "- **What's hindering:** {}",
+        at_a_glance.whats_hindering
+    )
+    .expect("write to string");
+    writeln!(&mut text, "- **Quick wins:** {}", at_a_glance.quick_wins)
+        .expect("write to string");
+    writeln!(
+        &mut text,
+        "- **Ambitious workflows:** {}",
+        at_a_glance.ambitious_workflows
+    )
+    .expect("write to string");
+
+    if !work_areas.is_empty() {
+        writeln!(&mut text, "\n## What You Work On").expect("write to string");
+        for area in work_areas {
+            writeln!(
+                &mut text,
+                "- **{}**: {}",
+                area.name, area.description
+            )
+            .expect("write to string");
+        }
+    }
+
+    writeln!(&mut text, "\n## How You Use Codex").expect("write to string");
+    writeln!(&mut text, "{}", interaction_style.narrative).expect("write to string");
+
+    if !what_works.is_empty() {
+        writeln!(&mut text, "\n## What Works").expect("write to string");
+        for item in what_works {
+            writeln!(&mut text, "- **{}**: {}", item.title, item.detail)
+                .expect("write to string");
+        }
+    }
+
+    if !friction.is_empty() {
+        writeln!(&mut text, "\n## Where Things Go Wrong").expect("write to string");
+        for item in friction {
+            writeln!(&mut text, "- **{}**: {}", item.category, item.detail)
+                .expect("write to string");
+            for example in &item.examples {
+                writeln!(&mut text, "  - {}", example).expect("write to string");
+            }
+        }
+    }
+
+    if !suggestions.is_empty() {
+        writeln!(&mut text, "\n## Suggestions").expect("write to string");
+        for item in suggestions {
+            writeln!(&mut text, "- **{}**: {}", item.title, item.detail)
+                .expect("write to string");
+        }
+    }
+
+    if !on_the_horizon.is_empty() {
+        writeln!(&mut text, "\n## On the Horizon").expect("write to string");
+        for item in on_the_horizon {
+            writeln!(&mut text, "- {}", item).expect("write to string");
+        }
+    }
+
+    if !evidence.is_empty() {
+        writeln!(&mut text, "\n## Evidence").expect("write to string");
+        for item in evidence {
+            writeln!(&mut text, "- {}", item).expect("write to string");
+        }
+    }
+
+    text.trim_end().to_owned()
+}
+
+fn write_insights_report_html(path: &Path, report: &InsightsReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create report directory {}", parent.display()))?;
+    }
+    fs::write(path, generate_insights_html(report))
+        .with_context(|| format!("failed to write report {}", path.display()))?;
+    Ok(())
+}
+
+fn generate_insights_html(report: &InsightsReport) -> String {
+    let work_areas = report
+        .work_areas
+        .iter()
+        .map(|area| {
+            format!(
+                "<li><strong>{}</strong>: {}</li>",
+                escape_html(&area.name),
+                escape_html(&area.description)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let what_works = report
+        .what_works
+        .iter()
+        .map(|item| {
+            format!(
+                "<li><strong>{}</strong>: {}</li>",
+                escape_html(&item.title),
+                escape_html(&item.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let friction = report
+        .friction
+        .iter()
+        .map(|item| {
+            let examples = if item.examples.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<ul>{}</ul>",
+                    item.examples
+                        .iter()
+                        .map(|example| format!("<li>{}</li>", escape_html(example)))
+                        .collect::<Vec<_>>()
+                        .join("")
+                )
+            };
+            format!(
+                "<li><strong>{}</strong>: {}{}</li>",
+                escape_html(&item.category),
+                escape_html(&item.detail),
+                examples
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let suggestions = report
+        .suggestions
+        .iter()
+        .map(|item| {
+            format!(
+                "<li><strong>{}</strong>: {}</li>",
+                escape_html(&item.title),
+                escape_html(&item.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let horizon = report
+        .on_the_horizon
+        .iter()
+        .map(|item| format!("<li>{}</li>", escape_html(item)))
+        .collect::<Vec<_>>()
+        .join("");
+    let evidence = report
+        .evidence
+        .iter()
+        .map(|item| format!("<li>{}</li>", escape_html(item)))
+        .collect::<Vec<_>>()
+        .join("");
+
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Codex Insights</title><style>body{{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;margin:40px auto;max-width:900px;padding:0 20px;line-height:1.6;color:#1f2937}}h1,h2{{color:#111827}}.meta{{color:#6b7280;margin-bottom:24px}}section{{margin:28px 0}}ul{{padding-left:20px}}.glance li{{margin:8px 0}}code{{background:#f3f4f6;padding:2px 6px;border-radius:6px}}</style></head><body><h1>Codex Insights</h1><div class=\"meta\">{} sessions scanned · {} analyzed · report generated at {}</div><section><h2>At a Glance</h2><ul class=\"glance\"><li><strong>What's working:</strong> {}</li><li><strong>What's hindering:</strong> {}</li><li><strong>Quick wins:</strong> {}</li><li><strong>Ambitious workflows:</strong> {}</li></ul></section><section><h2>What You Work On</h2><ul>{}</ul></section><section><h2>How You Use Codex</h2><p>{}</p></section><section><h2>What Works</h2><ul>{}</ul></section><section><h2>Where Things Go Wrong</h2><ul>{}</ul></section><section><h2>Suggestions</h2><ul>{}</ul></section><section><h2>On the Horizon</h2><ul>{}</ul></section><section><h2>Evidence</h2><ul>{}</ul></section></body></html>",
+        report.metadata.sessions_scanned,
+        report.metadata.sessions_analyzed,
+        escape_html(&report.metadata.generated_report_path),
+        escape_html(&report.at_a_glance.whats_working),
+        escape_html(&report.at_a_glance.whats_hindering),
+        escape_html(&report.at_a_glance.quick_wins),
+        escape_html(&report.at_a_glance.ambitious_workflows),
+        work_areas,
+        escape_html(&report.interaction_style.narrative),
+        what_works,
+        friction,
+        suggestions,
+        horizon,
+        evidence,
+    )
+}
+
+fn default_insights_report_path() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".codex")
+        .join("codex-threads")
+        .join("insights")
+        .join("report.html")
+}
+
+fn session_project_name(fact: &SessionFact) -> String {
+    fact.thread
+        .project_name
+        .clone()
+        .or_else(|| {
+            fact.thread
+                .cwd
+                .as_deref()
+                .and_then(|cwd| Path::new(cwd).file_name())
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn summarize_event_stream(events: &[EventItem]) -> Vec<EventSummaryItem> {
+    let mut summary = Vec::new();
+    let mut suppressed = 0usize;
+    let mut suppressed_timestamp = None;
+
+    for event in events {
+        if let Some(item) = summarize_event_item(event) {
+            if suppressed > 0 {
+                summary.push(EventSummaryItem {
+                    timestamp: suppressed_timestamp.take(),
+                    category: "suppressed".to_owned(),
+                    detail: format!("suppressed {suppressed} low-signal events"),
+                });
+                suppressed = 0;
+            }
+            summary.push(item);
+        } else {
+            suppressed += 1;
+            if suppressed_timestamp.is_none() {
+                suppressed_timestamp = event.timestamp.clone();
+            }
+        }
+    }
+
+    if suppressed > 0 {
+        summary.push(EventSummaryItem {
+            timestamp: suppressed_timestamp,
+            category: "suppressed".to_owned(),
+            detail: format!("suppressed {suppressed} low-signal events"),
+        });
+    }
+
+    summary
+}
+
+fn summarize_event_item(event: &EventItem) -> Option<EventSummaryItem> {
+    match (event.kind.as_str(), event.event_type.as_deref()) {
+        ("session_meta", _) => event
+            .payload
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|cwd| EventSummaryItem {
+                timestamp: event.timestamp.clone(),
+                category: "session".to_owned(),
+                detail: format!("started in {cwd}"),
+            }),
+        ("event_msg", Some("user_message" | "agent_message")) => event
+            .payload
+            .get("message")
+            .and_then(Value::as_str)
+            .map(|text| EventSummaryItem {
+                timestamp: event.timestamp.clone(),
+                category: "message".to_owned(),
+                detail: one_line(text, 180),
+            }),
+        ("event_msg", Some("exec_command_end")) => summarize_exec_command_end(event),
+        ("response_item", Some("function_call")) => summarize_tool_call(event),
+        ("response_item", Some("function_call_output" | "custom_tool_call_output")) => {
+            summarize_tool_output_issue(event)
+        }
+        _ => None,
+    }
+}
+
+fn summarize_exec_command_end(event: &EventItem) -> Option<EventSummaryItem> {
+    let payload = &event.payload;
+    let command = extract_exec_command(payload).unwrap_or_else(|| "exec_command".to_owned());
+    let exit_code = payload.get("exit_code").and_then(Value::as_i64).unwrap_or(0);
+    let duration = format_duration(payload).unwrap_or_else(|| "unknown duration".to_owned());
+    let mut detail = if exit_code == 0 {
+        format!("`{}` completed successfully in {}", one_line(&command, 120), duration)
+    } else {
+        format!(
+            "`{}` failed with exit code {} in {}",
+            one_line(&command, 120),
+            exit_code,
+            duration
+        )
+    };
+
+    if exit_code != 0 {
+        if let Some(stderr) = payload.get("stderr").and_then(Value::as_str) {
+            let stderr = stderr.trim();
+            if !stderr.is_empty() {
+                detail.push_str(&format!(": {}", one_line(stderr, 160)));
+            }
+        } else if let Some(output) = payload.get("aggregated_output").and_then(Value::as_str) {
+            let output = output.trim();
+            if !output.is_empty() {
+                detail.push_str(&format!(": {}", one_line(output, 160)));
+            }
+        }
+    }
+
+    Some(EventSummaryItem {
+        timestamp: event.timestamp.clone(),
+        category: if exit_code == 0 {
+            "command".to_owned()
+        } else {
+            "error".to_owned()
+        },
+        detail,
+    })
+}
+
+fn summarize_tool_call(event: &EventItem) -> Option<EventSummaryItem> {
+    let payload = &event.payload;
+    let name = payload.get("name").and_then(Value::as_str)?;
+
+    if name == "write_stdin" || name == "exec_command" {
+        return None;
+    }
+
+    let detail = if name == "apply_patch" {
+        let arguments = payload.get("arguments").and_then(Value::as_str).unwrap_or("");
+        let targets = extract_patch_targets(arguments);
+        if targets.is_empty() {
+            "apply_patch".to_owned()
+        } else {
+            format!("apply_patch {}", targets.join(", "))
+        }
+    } else {
+        format!("{}()", name)
+    };
+
+    Some(EventSummaryItem {
+        timestamp: event.timestamp.clone(),
+        category: "tool".to_owned(),
+        detail,
+    })
+}
+
+fn summarize_tool_output_issue(event: &EventItem) -> Option<EventSummaryItem> {
+    let output = event.payload.get("output").and_then(Value::as_str)?;
+    let cleaned = sanitize_tool_output_issue(output)?;
+    if !looks_like_error_output(&cleaned) {
+        return None;
+    }
+
+    Some(EventSummaryItem {
+        timestamp: event.timestamp.clone(),
+        category: "error".to_owned(),
+        detail: one_line(&cleaned, 180),
+    })
 }
 
 fn find_thread(conn: &Connection, session_id: &str) -> Result<ThreadSummary> {
@@ -1494,6 +2804,410 @@ fn clean_thread_message(mut message: ThreadMessage, max_message_chars: usize) ->
     message
 }
 
+fn clean_search_text(text: &str, max_message_chars: usize) -> String {
+    clean_thread_message(
+        ThreadMessage {
+            timestamp: None,
+            role: "user".to_owned(),
+            phase: None,
+            text: text.to_owned(),
+            cleaned: false,
+            original_chars: None,
+        },
+        max_message_chars,
+    )
+    .text
+}
+
+fn is_substantive_message(text: &str) -> bool {
+    let normalized = normalize_summary_value(text);
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.starts_with("[skill payload omitted")
+        || normalized.starts_with("[pasted context collapsed")
+        || normalized.starts_with("[truncated from")
+    {
+        return false;
+    }
+    if matches!(
+        normalized.as_str(),
+        "ok"
+            | "okay"
+            | "可以"
+            | "好的"
+            | "推进"
+            | "继续"
+            | "继续完善"
+            | "好的推进"
+            | "好的继续"
+            | "可以继续"
+            | "可以继续完善"
+            | "ok我们再使用这个看看效果呢"
+    ) {
+        return false;
+    }
+
+    normalized.chars().count() > 8 || normalized.split_whitespace().count() > 2
+}
+
+fn normalize_summary_value(text: &str) -> String {
+    compact_whitespace(text)
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '，' | ',' | '。' | '.' | '！' | '!' | '?' | '？')
+        })
+        .to_lowercase()
+}
+
+fn push_unique(items: &mut Vec<String>, value: String, limit: usize) {
+    let normalized = normalize_summary_value(&value);
+    if items
+        .iter()
+        .any(|existing| normalize_summary_value(existing) == normalized)
+    {
+        return;
+    }
+    if items.len() < limit {
+        items.push(value);
+    }
+}
+
+fn build_insight_title(digest: &ThreadDigest) -> String {
+    if let Some(objective) = &digest.objective {
+        let normalized = normalize_summary_value(objective);
+        if normalized.contains("cli") {
+            return "Insight: A threads CLI becomes useful when retrieval is clean and routine"
+                .to_owned();
+        }
+        return format!("Insight: {}", one_line(objective, 72));
+    }
+
+    "Insight: Thread review".to_owned()
+}
+
+fn build_insight_summary(digest: &ThreadDigest) -> String {
+    match (&digest.objective, &digest.outcome) {
+        (Some(objective), Some(outcome)) => format!(
+            "{} The thread ended with: {}",
+            one_line(objective, 160),
+            one_line(outcome, 180)
+        ),
+        (Some(objective), None) => one_line(objective, 220),
+        (None, Some(outcome)) => one_line(outcome, 220),
+        (None, None) => "No strong summary signal found in this thread.".to_owned(),
+    }
+}
+
+fn derive_insight_points(digest: &ThreadDigest) -> Vec<String> {
+    let corpus = insight_corpus(digest);
+    let normalized = normalize_summary_value(&corpus);
+    let mut insights = Vec::new();
+
+    if normalized.contains("recent") || normalized.contains("resolve") {
+        push_unique(
+            &mut insights,
+            "Recency needs to be a first-class retrieval primitive; search and resolve alone are not enough for day-to-day use.".to_owned(),
+            5,
+        );
+    }
+    if normalized.contains("clean")
+        || normalized.contains("折叠")
+        || normalized.contains("pasted context")
+        || normalized.contains("skill payload omitted")
+        || normalized.contains("噪声")
+    {
+        push_unique(
+            &mut insights,
+            "A thread archive only becomes reusable once pasted context and framework noise are collapsed by default.".to_owned(),
+            5,
+        );
+    }
+    if normalized.contains("snippet")
+        || normalized.contains("messages search")
+        || normalized.contains("search")
+    {
+        push_unique(
+            &mut insights,
+            "Message search should return snippets, not full messages, so the result list stays scannable under real workloads.".to_owned(),
+            5,
+        );
+    }
+    if normalized.contains("events summary")
+        || normalized.contains("events read")
+        || normalized.contains("event stream")
+    {
+        push_unique(
+            &mut insights,
+            "Raw event streams are too noisy for reflection; a summary layer should preserve commands, edits, and failures while suppressing operational chatter.".to_owned(),
+            5,
+        );
+    }
+    if normalized.contains("summarize")
+        || normalized.contains("复盘")
+        || normalized.contains("insight")
+    {
+        push_unique(
+            &mut insights,
+            "A reusable threads CLI needs a final interpretation layer that turns operational traces into a readable conclusion, not just searchable logs.".to_owned(),
+            5,
+        );
+    }
+    if normalized.contains("github repo") || normalized.contains("开源") {
+        push_unique(
+            &mut insights,
+            "Open-sourcing the tool forced the interface to become clearer: commands, JSON shape, and docs all had to survive real reuse outside the original thread.".to_owned(),
+            5,
+        );
+    }
+
+    if insights.is_empty() {
+        push_unique(
+            &mut insights,
+            "The main pattern in this thread is that useful memory tools need interpretation, not just storage and retrieval.".to_owned(),
+            5,
+        );
+    }
+
+    insights
+}
+
+fn build_insight_evidence(digest: &ThreadDigest) -> Vec<String> {
+    let mut evidence = Vec::new();
+
+    for request in digest.key_requests.iter().take(3) {
+        push_unique(
+            &mut evidence,
+            format!("User request: {}", one_line(request, 180)),
+            6,
+        );
+    }
+
+    for action in digest.key_actions.iter().rev().take(3).collect::<Vec<_>>().into_iter().rev() {
+        push_unique(
+            &mut evidence,
+            format!("Execution: {}", one_line(&action.detail, 180)),
+            6,
+        );
+    }
+
+    if let Some(outcome) = &digest.outcome {
+        push_unique(
+            &mut evidence,
+            format!("Outcome: {}", one_line(outcome, 180)),
+            6,
+        );
+    }
+
+    evidence
+}
+
+fn derive_next_steps(digest: &ThreadDigest, insights: &[String]) -> Vec<String> {
+    let normalized = normalize_summary_value(&insight_corpus(digest));
+    let mut next_steps = Vec::new();
+
+    if normalized.contains("insight") || normalized.contains("聊天记录") {
+        push_unique(
+            &mut next_steps,
+            "Add a recent-threads batch mode that generates one insight note per thread.".to_owned(),
+            4,
+        );
+    }
+    if normalized.contains("开源") || normalized.contains("github repo") {
+        push_unique(
+            &mut next_steps,
+            "Add markdown export so an insight can be dropped directly into a README, issue, or changelog.".to_owned(),
+            4,
+        );
+    }
+    if insights.iter().any(|item| item.contains("interpretation layer")) {
+        push_unique(
+            &mut next_steps,
+            "Add optional frontmatter tags like project, theme, and outcome to make insights easier to archive.".to_owned(),
+            4,
+        );
+    }
+    if next_steps.is_empty() {
+        push_unique(
+            &mut next_steps,
+            "Add a batch mode so this insight format can be applied to recent threads without resolving one session at a time.".to_owned(),
+            4,
+        );
+    }
+
+    next_steps
+}
+
+fn render_insight_content(
+    title: &str,
+    summary: &str,
+    insights: &[String],
+    evidence: &[String],
+    next_steps: &[String],
+) -> String {
+    let mut text = String::new();
+    writeln!(&mut text, "# {}", title).expect("write to string");
+    writeln!(&mut text).expect("write to string");
+    writeln!(&mut text, "{}", summary).expect("write to string");
+
+    if !insights.is_empty() {
+        writeln!(&mut text).expect("write to string");
+        writeln!(&mut text, "## What This Thread Suggests").expect("write to string");
+        for insight in insights {
+            writeln!(&mut text, "- {}", insight).expect("write to string");
+        }
+    }
+
+    if !evidence.is_empty() {
+        writeln!(&mut text).expect("write to string");
+        writeln!(&mut text, "## Evidence").expect("write to string");
+        for item in evidence {
+            writeln!(&mut text, "- {}", item).expect("write to string");
+        }
+    }
+
+    if !next_steps.is_empty() {
+        writeln!(&mut text).expect("write to string");
+        writeln!(&mut text, "## Next").expect("write to string");
+        for step in next_steps {
+            writeln!(&mut text, "- {}", step).expect("write to string");
+        }
+    }
+
+    text.trim_end().to_owned()
+}
+
+fn insight_corpus(digest: &ThreadDigest) -> String {
+    [
+        digest.objective.as_deref().unwrap_or(""),
+        &digest.key_requests.join(" "),
+        &digest
+            .key_actions
+            .iter()
+            .map(|item| item.detail.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        digest.outcome.as_deref().unwrap_or(""),
+    ]
+    .join(" ")
+}
+
+fn extract_exec_command(payload: &Value) -> Option<String> {
+    if let Some(cmd) = payload
+        .get("parsed_cmd")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("cmd"))
+        .and_then(Value::as_str)
+    {
+        return Some(cmd.to_owned());
+    }
+
+    let command = payload.get("command").and_then(Value::as_array)?;
+    if command.len() >= 3
+        && command.get(1).and_then(Value::as_str).is_some_and(|part| part == "-lc")
+    {
+        return command.get(2).and_then(Value::as_str).map(ToOwned::to_owned);
+    }
+
+    Some(
+        command
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn format_duration(payload: &Value) -> Option<String> {
+    let duration = payload.get("duration")?;
+    let secs = duration.get("secs").and_then(Value::as_i64).unwrap_or(0);
+    let nanos = duration.get("nanos").and_then(Value::as_i64).unwrap_or(0);
+    let millis = secs.saturating_mul(1000) + nanos.saturating_div(1_000_000);
+
+    if millis >= 1000 {
+        Some(format!("{:.1}s", millis as f64 / 1000.0))
+    } else {
+        Some(format!("{}ms", millis.max(1)))
+    }
+}
+
+fn extract_patch_targets(arguments: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+
+    for line in arguments.lines() {
+        for prefix in ["*** Update File: ", "*** Add File: ", "*** Delete File: "] {
+            if let Some(target) = line.strip_prefix(prefix) {
+                let target = target.trim().to_owned();
+                if !target.is_empty() && !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+    }
+
+    targets
+}
+
+fn looks_like_error_output(text: &str) -> bool {
+    let normalized = text.to_lowercase();
+    if normalized.contains("exited with code 0")
+        || normalized.contains("exit code 0")
+        || normalized.contains("0 failed")
+    {
+        return false;
+    }
+    let head = normalized.chars().take(160).collect::<String>();
+
+    [
+        "error:",
+        "failed",
+        "panic",
+        "exception",
+        "traceback",
+        "not found",
+        "permission denied",
+        "timed out",
+        "unexpected error",
+        "💥",
+    ]
+    .iter()
+    .any(|needle| head.contains(needle))
+        || normalized.contains("exit code 1")
+        || normalized.contains("exited with code 1")
+}
+
+fn sanitize_tool_output_issue(text: &str) -> Option<String> {
+    let output_only = text
+        .split_once("\nOutput:\n")
+        .map(|(_, suffix)| suffix)
+        .unwrap_or(text);
+
+    let filtered_lines = output_only
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !line.starts_with("Chunk ID:")
+                && !line.starts_with("Wall time:")
+                && !line.starts_with("Process exited with code")
+                && !line.starts_with("Original token count:")
+                && *line != "Output:"
+        })
+        .filter(|line| !line.starts_with('+'))
+        .collect::<Vec<_>>();
+
+    if filtered_lines.is_empty() {
+        return None;
+    }
+
+    let cleaned = compact_whitespace(&filtered_lines.join(" "));
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
 fn looks_like_pasted_context(text: &str) -> bool {
     let line_count = text.lines().count();
     text.starts_with("<skill>")
@@ -1516,8 +3230,12 @@ fn normalize_query(query: &str) -> String {
     query.trim().to_lowercase()
 }
 
+fn compact_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn one_line(text: &str, max_len: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = compact_whitespace(text);
     if normalized.chars().count() <= max_len {
         normalized
     } else {
@@ -1527,6 +3245,76 @@ fn one_line(text: &str, max_len: usize) -> String {
             .collect::<String>();
         format!("{truncated}…")
     }
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn build_search_snippet(text: &str, query: &str, max_len: usize) -> String {
+    let compact = compact_whitespace(text);
+    if compact.is_empty() {
+        return compact;
+    }
+
+    if query.is_empty() {
+        return one_line(&compact, max_len);
+    }
+
+    let compact_lower = compact.to_lowercase();
+    let match_bytes = compact_lower.find(query);
+    let total_chars = compact.chars().count();
+
+    let Some(match_byte_start) = match_bytes else {
+        return one_line(&compact, max_len);
+    };
+
+    let match_char_start = compact_lower[..match_byte_start].chars().count();
+    let match_char_len = query.chars().count().max(1);
+    if total_chars <= max_len {
+        return compact;
+    }
+
+    let context_budget = max_len.saturating_sub(match_char_len);
+    let leading_context = context_budget / 2;
+    let trailing_context = context_budget - leading_context;
+
+    let mut start_char = match_char_start.saturating_sub(leading_context);
+    let mut end_char = (match_char_start + match_char_len + trailing_context).min(total_chars);
+
+    if end_char - start_char < max_len {
+        start_char = end_char.saturating_sub(max_len);
+    }
+    if end_char - start_char < max_len {
+        end_char = (start_char + max_len).min(total_chars);
+    }
+
+    let snippet = slice_chars(&compact, start_char, end_char).trim().to_owned();
+    let prefix = if start_char > 0 { "…" } else { "" };
+    let suffix = if end_char < total_chars { "…" } else { "" };
+    format!("{prefix}{snippet}{suffix}")
+}
+
+fn slice_chars(text: &str, start_char: usize, end_char: usize) -> &str {
+    if start_char >= end_char {
+        return "";
+    }
+
+    let start_byte = text
+        .char_indices()
+        .nth(start_char)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    let end_byte = text
+        .char_indices()
+        .nth(end_char)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    &text[start_byte..end_byte]
 }
 
 fn ensure_column_exists(
@@ -1608,6 +3396,11 @@ mod tests {
         let matches = search_messages(&conn, "build a CLI", 10).unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].thread_id, "019d8510-9b67-7ff0-914c-cc313085e394");
+        assert_eq!(
+            matches[0].summary.as_deref(),
+            Some("build a CLI that searches Codex threads")
+        );
+        assert_eq!(matches[0].snippet, "build a CLI that searches Codex threads");
 
         let threads = resolve_threads(&conn, "example-project", 10).unwrap();
         assert_eq!(threads.len(), 1);
@@ -1652,5 +3445,321 @@ mod tests {
         assert!(cleaned.cleaned);
         assert!(cleaned.text.contains("skill payload omitted"));
         assert!(cleaned.text.contains("opencli-usage"));
+    }
+
+    #[test]
+    fn search_snippet_centers_the_match() {
+        let text = "before context before context before context before context before context build a CLI with clean JSON output and composable commands after context after context after context after context after context";
+        let snippet = build_search_snippet(text, "build a cli", 80);
+
+        assert!(snippet.contains("build a CLI with clean JSON output"));
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= 82);
+    }
+
+    #[test]
+    fn clean_search_text_collapses_skill_payloads() {
+        let text = "<skill>\n<name>opencli-usage</name>\n<path>/tmp/opencli/SKILL.md</path>\n---\nname: opencli-usage\nlong payload\n</skill>";
+        let cleaned = clean_search_text(text, 600);
+
+        assert_eq!(
+            cleaned,
+            "[skill payload omitted: opencli-usage | /tmp/opencli/SKILL.md]"
+        );
+    }
+
+    #[test]
+    fn summarize_event_stream_suppresses_noise_and_keeps_high_signal_items() {
+        let events = vec![
+            EventItem {
+                timestamp: Some("2026-04-13T05:00:00Z".to_owned()),
+                kind: "event_msg".to_owned(),
+                event_type: Some("token_count".to_owned()),
+                summary: Some("token_count".to_owned()),
+                payload: json!({ "type": "token_count" }),
+            },
+            EventItem {
+                timestamp: Some("2026-04-13T05:00:01Z".to_owned()),
+                kind: "response_item".to_owned(),
+                event_type: Some("function_call".to_owned()),
+                summary: Some("function_call apply_patch".to_owned()),
+                payload: json!({
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "arguments": "*** Begin Patch\n*** Update File: src/main.rs\n*** End Patch\n"
+                }),
+            },
+            EventItem {
+                timestamp: Some("2026-04-13T05:00:02Z".to_owned()),
+                kind: "event_msg".to_owned(),
+                event_type: Some("exec_command_end".to_owned()),
+                summary: Some("exec_command_end".to_owned()),
+                payload: json!({
+                    "type": "exec_command_end",
+                    "parsed_cmd": [{ "cmd": "cargo test", "type": "unknown" }],
+                    "duration": { "secs": 2, "nanos": 250_000_000 },
+                    "exit_code": 0
+                }),
+            },
+        ];
+
+        let summary = summarize_event_stream(&events);
+        assert_eq!(summary.len(), 3);
+        assert_eq!(summary[0].category, "suppressed");
+        assert_eq!(summary[1].category, "tool");
+        assert_eq!(summary[1].detail, "apply_patch src/main.rs");
+        assert_eq!(summary[2].category, "command");
+        assert!(summary[2].detail.contains("cargo test"));
+    }
+
+    #[test]
+    fn summarize_failed_exec_command_as_error() {
+        let event = EventItem {
+            timestamp: Some("2026-04-13T05:00:00Z".to_owned()),
+            kind: "event_msg".to_owned(),
+            event_type: Some("exec_command_end".to_owned()),
+            summary: Some("exec_command_end".to_owned()),
+            payload: json!({
+                "type": "exec_command_end",
+                "command": ["/bin/zsh", "-lc", "cargo test"],
+                "duration": { "secs": 0, "nanos": 450_000_000 },
+                "exit_code": 1,
+                "stderr": "test suite failed"
+            }),
+        };
+
+        let item = summarize_event_item(&event).unwrap();
+        assert_eq!(item.category, "error");
+        assert!(item.detail.contains("exit code 1"));
+        assert!(item.detail.contains("test suite failed"));
+    }
+
+    #[test]
+    fn build_thread_digest_extracts_objective_requests_actions_and_outcome() {
+        let thread = ThreadSummary {
+            thread_id: "thread-1".to_owned(),
+            path: "/tmp/thread.jsonl".to_owned(),
+            started_at: Some("2026-04-13T05:00:00Z".to_owned()),
+            cwd: Some("/tmp/example-project".to_owned()),
+            project_name: Some("example-project".to_owned()),
+            summary: Some("build a CLI that searches Codex threads".to_owned()),
+            originator: None,
+            cli_version: None,
+            model_provider: None,
+            agent_nickname: None,
+            agent_role: None,
+            message_count: 4,
+            event_count: 3,
+        };
+        let messages = vec![
+            ThreadMessage {
+                timestamp: Some("2026-04-13T05:00:01Z".to_owned()),
+                role: "user".to_owned(),
+                phase: None,
+                text: "build a CLI that searches Codex threads".to_owned(),
+                cleaned: false,
+                original_chars: None,
+            },
+            ThreadMessage {
+                timestamp: Some("2026-04-13T05:00:02Z".to_owned()),
+                role: "user".to_owned(),
+                phase: None,
+                text: "你可以单独开一个新的子文件夹，然后建一个 github repo".to_owned(),
+                cleaned: false,
+                original_chars: None,
+            },
+            ThreadMessage {
+                timestamp: Some("2026-04-13T05:00:03Z".to_owned()),
+                role: "user".to_owned(),
+                phase: None,
+                text: "可以".to_owned(),
+                cleaned: false,
+                original_chars: None,
+            },
+            ThreadMessage {
+                timestamp: Some("2026-04-13T05:00:04Z".to_owned()),
+                role: "assistant".to_owned(),
+                phase: Some("final_answer".to_owned()),
+                text: "已经做完。我创建了独立仓库并实现了 CLI。".to_owned(),
+                cleaned: false,
+                original_chars: None,
+            },
+        ];
+        let events = vec![
+            EventSummaryItem {
+                timestamp: Some("2026-04-13T05:00:05Z".to_owned()),
+                category: "suppressed".to_owned(),
+                detail: "suppressed 5 low-signal events".to_owned(),
+            },
+            EventSummaryItem {
+                timestamp: Some("2026-04-13T05:00:06Z".to_owned()),
+                category: "command".to_owned(),
+                detail: "`cargo test` completed successfully in 2.3s".to_owned(),
+            },
+            EventSummaryItem {
+                timestamp: Some("2026-04-13T05:00:07Z".to_owned()),
+                category: "tool".to_owned(),
+                detail: "apply_patch src/main.rs".to_owned(),
+            },
+        ];
+
+        let digest = build_thread_digest(thread, messages, events);
+        assert_eq!(
+            digest.objective.as_deref(),
+            Some("build a CLI that searches Codex threads")
+        );
+        assert_eq!(digest.key_requests.len(), 1);
+        assert!(digest.key_requests[0].contains("新的子文件夹"));
+        assert_eq!(digest.key_actions.len(), 2);
+        assert_eq!(digest.key_actions[0].category, "command");
+        assert_eq!(
+            digest.outcome.as_deref(),
+            Some("已经做完。我创建了独立仓库并实现了 CLI。")
+        );
+    }
+
+    #[test]
+    fn build_thread_insight_renders_note_content() {
+        let digest = ThreadDigest {
+            thread: ThreadSummary {
+                thread_id: "thread-1".to_owned(),
+                path: "/tmp/thread.jsonl".to_owned(),
+                started_at: Some("2026-04-13T05:00:00Z".to_owned()),
+                cwd: Some("/tmp/example-project".to_owned()),
+                project_name: Some("example-project".to_owned()),
+                summary: Some("build a CLI that searches Codex threads".to_owned()),
+                originator: None,
+                cli_version: None,
+                model_provider: None,
+                agent_nickname: None,
+                agent_role: None,
+                message_count: 4,
+                event_count: 3,
+            },
+            objective: Some("build a CLI that searches Codex threads".to_owned()),
+            key_requests: vec![
+                "我们测试一下这个cli，你利用这个cli读取我们最近的聊天看看有哪些可以改进的".to_owned(),
+            ],
+            key_actions: vec![EventSummaryItem {
+                timestamp: Some("2026-04-13T05:00:06Z".to_owned()),
+                category: "command".to_owned(),
+                detail: "`messages search` completed successfully in 585ms".to_owned(),
+            }],
+            outcome: Some(
+                "现在效果明显比上一版对了，messages search 已经改成 snippet-first。"
+                    .to_owned(),
+            ),
+        };
+
+        let insight = build_thread_insight(digest);
+        assert!(insight.title.starts_with("Insight:"));
+        assert!(!insight.insights.is_empty());
+        assert!(insight.content.contains("## What This Thread Suggests"));
+        assert!(insight.content.contains("## Evidence"));
+    }
+
+    fn sample_fact(thread_id: &str, project: &str, objective: &str) -> SessionFact {
+        SessionFact {
+            thread: ThreadSummary {
+                thread_id: thread_id.to_owned(),
+                path: format!("/tmp/{thread_id}.jsonl"),
+                started_at: Some(format!("2026-04-13T05:00:0{}Z", thread_id.chars().last().unwrap_or('0'))),
+                cwd: Some(format!("/tmp/{project}")),
+                project_name: Some(project.to_owned()),
+                summary: Some(objective.to_owned()),
+                originator: None,
+                cli_version: None,
+                model_provider: None,
+                agent_nickname: None,
+                agent_role: None,
+                message_count: 4,
+                event_count: 2,
+            },
+            objective: Some(objective.to_owned()),
+            outcome: Some(format!("Finished {objective}")),
+            key_requests: vec![format!("Please improve {objective}")],
+            key_actions: vec![EventSummaryItem {
+                timestamp: Some("2026-04-13T05:00:06Z".to_owned()),
+                category: "command".to_owned(),
+                detail: "`cargo test` completed successfully in 2.3s".to_owned(),
+            }],
+            substantive_user_messages: 2,
+            cleaned_context_messages: 0,
+            command_successes: 1,
+            command_failures: 0,
+        }
+    }
+
+    #[test]
+    fn sanitize_tool_output_issue_drops_chunk_wrapper_noise() {
+        let output = "Chunk ID: abcd\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 0\nOutput:\n+ set -euo pipefail\nerror: missing session file\n";
+        let cleaned = sanitize_tool_output_issue(output).unwrap();
+
+        assert_eq!(cleaned, "error: missing session file");
+    }
+
+    #[test]
+    fn summarize_tool_output_issue_ignores_wrapper_without_real_error_text() {
+        let event = EventItem {
+            timestamp: Some("2026-04-13T05:00:00Z".to_owned()),
+            kind: "response_item".to_owned(),
+            event_type: Some("function_call_output".to_owned()),
+            summary: None,
+            payload: json!({
+                "output": "Chunk ID: abcd\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 0\nOutput:\n+ set -euo pipefail\n"
+            }),
+        };
+
+        assert!(summarize_tool_output_issue(&event).is_none());
+    }
+
+    #[test]
+    fn looks_like_error_output_ignores_long_docs_with_late_failed_word() {
+        let text = "docs/project_progress/wiki-maintenance/wiki-branch-convergence-audit-2026-04.md:105 Verified by workflow checks so future branch drift is detected automatically and tracked in CI. Additional planning context follows here for many words before mentioning something failed much later in the document body.";
+
+        assert!(!looks_like_error_output(text));
+    }
+
+    #[test]
+    fn select_insight_facts_round_robins_projects_for_global_reports() {
+        let facts = vec![
+            sample_fact("1", "mnemo", "mnemo one"),
+            sample_fact("2", "mnemo", "mnemo two"),
+            sample_fact("3", "opensource", "open one"),
+            sample_fact("4", "mnemo", "mnemo three"),
+            sample_fact("5", "physedit", "phys one"),
+        ];
+        let args = InsightsArgs {
+            limit: 4,
+            project: None,
+            output: None,
+            event_limit: 120,
+            max_message_chars: 1600,
+        };
+
+        let selected = select_insight_facts(facts, &args);
+        let projects = selected
+            .iter()
+            .map(session_project_name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            projects,
+            vec![
+                "mnemo".to_owned(),
+                "opensource".to_owned(),
+                "physedit".to_owned(),
+                "mnemo".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_global_evidence_includes_user_requests() {
+        let evidence = build_global_evidence(&[sample_fact("1", "mnemo", "plan mnemo")]);
+
+        assert!(evidence.iter().any(|item| item.starts_with("User request:")));
+        assert!(evidence.iter().any(|item| item.starts_with("Session objective:")));
     }
 }
