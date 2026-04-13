@@ -92,6 +92,7 @@ enum MessagesCommand {
 #[derive(Debug, Subcommand)]
 enum ThreadsCommand {
     Resolve(SearchArgs),
+    Recent(RecentThreadsArgs),
     Read(ReadThreadArgs),
 }
 
@@ -114,6 +115,24 @@ struct ReadThreadArgs {
 
     #[arg(long)]
     limit: Option<usize>,
+
+    #[arg(long, default_value_t = 1600)]
+    max_message_chars: usize,
+
+    #[arg(long)]
+    raw: bool,
+}
+
+#[derive(Debug, Args)]
+struct RecentThreadsArgs {
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+
+    #[arg(long)]
+    cwd: Option<String>,
+
+    #[arg(long)]
+    project: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -169,6 +188,7 @@ struct ThreadResolveResult {
     event_count: usize,
     match_count: usize,
     last_match_at: Option<String>,
+    sort_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -177,6 +197,40 @@ struct ThreadMessage {
     role: String,
     phase: Option<String>,
     text: String,
+    cleaned: bool,
+    original_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecentThreadResult {
+    thread_id: String,
+    started_at: Option<String>,
+    cwd: Option<String>,
+    project_name: Option<String>,
+    summary: Option<String>,
+    path: String,
+    message_count: usize,
+    event_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ThreadResolveCandidate {
+    thread_id: String,
+    started_at: Option<String>,
+    cwd: Option<String>,
+    project_name: Option<String>,
+    summary: Option<String>,
+    path: String,
+    message_count: usize,
+    event_count: usize,
+    match_count: usize,
+    last_match_at: Option<String>,
+    project_exact: bool,
+    project_contains: bool,
+    cwd_contains: bool,
+    path_contains: bool,
+    summary_contains: bool,
+    thread_id_contains: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -244,9 +298,14 @@ fn run(cli: Cli) -> Result<RenderedOutput> {
             ThreadsCommand::Resolve(args) => {
                 render_threads_resolve(resolve_threads(&conn, &args.query, args.limit)?)
             }
-            ThreadsCommand::Read(args) => {
-                render_thread_read(read_thread(&conn, &args.session_id, args.limit)?)
-            }
+            ThreadsCommand::Recent(args) => render_threads_recent(recent_threads(&conn, &args)?),
+            ThreadsCommand::Read(args) => render_thread_read(read_thread(
+                &conn,
+                &args.session_id,
+                args.limit,
+                !args.raw,
+                args.max_message_chars,
+            )?),
         },
         Command::Events { command } => match command {
             EventsCommand::Read(args) => {
@@ -349,6 +408,7 @@ fn render_threads_resolve(results: Vec<ThreadResolveResult>) -> Result<RenderedO
             writeln!(&mut text, "   cwd: {}", cwd)?;
         }
         writeln!(&mut text, "   matches: {}", item.match_count)?;
+        writeln!(&mut text, "   why: {}", item.sort_reason)?;
         if let Some(summary) = &item.summary {
             writeln!(&mut text, "   {}", one_line(summary, 240))?;
         }
@@ -361,6 +421,35 @@ fn render_threads_resolve(results: Vec<ThreadResolveResult>) -> Result<RenderedO
     Ok(RenderedOutput {
         text,
         json: json!({ "ok": true, "command": "threads.resolve", "data": results }),
+    })
+}
+
+fn render_threads_recent(results: Vec<RecentThreadResult>) -> Result<RenderedOutput> {
+    let mut text = String::new();
+    for (index, item) in results.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+            text.push('\n');
+        }
+        writeln!(&mut text, "{}. {}", index + 1, item.thread_id)?;
+        if let Some(started_at) = &item.started_at {
+            writeln!(&mut text, "   started: {}", started_at)?;
+        }
+        if let Some(cwd) = &item.cwd {
+            writeln!(&mut text, "   cwd: {}", cwd)?;
+        }
+        if let Some(summary) = &item.summary {
+            writeln!(&mut text, "   {}", one_line(summary, 240))?;
+        }
+    }
+
+    if results.is_empty() {
+        text.push_str("No recent threads found.");
+    }
+
+    Ok(RenderedOutput {
+        text,
+        json: json!({ "ok": true, "command": "threads.recent", "data": results }),
     })
 }
 
@@ -392,6 +481,16 @@ fn render_thread_read(payload: (ThreadSummary, Vec<ThreadMessage>)) -> Result<Re
                 .map(|phase| format!(" ({phase})"))
                 .unwrap_or_default()
         )?;
+        if message.cleaned {
+            writeln!(
+                &mut text,
+                "[cleaned{}]",
+                message
+                    .original_chars
+                    .map(|count| format!(" from {count} chars"))
+                    .unwrap_or_default()
+            )?;
+        }
         writeln!(&mut text, "{}", message.text)?;
     }
 
@@ -677,24 +776,27 @@ fn resolve_threads(
             t.event_count,
             SUM(CASE WHEN instr(m.text_lower, ?1) > 0 THEN 1 ELSE 0 END) AS match_count,
             MAX(CASE WHEN instr(m.text_lower, ?1) > 0 THEN m.timestamp ELSE NULL END) AS last_match_at,
-            CASE
-                WHEN instr(lower(t.thread_id), ?1) > 0
-                  OR instr(lower(COALESCE(t.summary, '')), ?1) > 0
-                  OR instr(lower(COALESCE(t.cwd, '')), ?1) > 0
-                  OR instr(lower(COALESCE(t.path, '')), ?1) > 0
-                THEN 1 ELSE 0
-            END AS thread_match
+            CASE WHEN lower(COALESCE(t.project_name, '')) = ?1 THEN 1 ELSE 0 END AS project_exact,
+            CASE WHEN instr(lower(COALESCE(t.project_name, '')), ?1) > 0 THEN 1 ELSE 0 END AS project_contains,
+            CASE WHEN instr(lower(COALESCE(t.cwd, '')), ?1) > 0 THEN 1 ELSE 0 END AS cwd_contains,
+            CASE WHEN instr(lower(COALESCE(t.path, '')), ?1) > 0 THEN 1 ELSE 0 END AS path_contains,
+            CASE WHEN instr(lower(COALESCE(t.summary, '')), ?1) > 0 THEN 1 ELSE 0 END AS summary_contains,
+            CASE WHEN instr(lower(t.thread_id), ?1) > 0 THEN 1 ELSE 0 END AS thread_id_contains
         FROM threads t
         LEFT JOIN messages m ON m.thread_id = t.thread_id
         GROUP BY t.thread_id
-        HAVING thread_match = 1 OR match_count > 0
-        ORDER BY thread_match DESC, match_count DESC, COALESCE(last_match_at, t.started_at) DESC
-        LIMIT ?2
+        HAVING project_exact = 1
+            OR project_contains = 1
+            OR cwd_contains = 1
+            OR path_contains = 1
+            OR summary_contains = 1
+            OR thread_id_contains = 1
+            OR match_count > 0
         "#,
     )?;
 
-    let rows = stmt.query_map(params![normalized, limit as i64], |row| {
-        Ok(ThreadResolveResult {
+    let rows = stmt.query_map(params![normalized], |row| {
+        Ok(ThreadResolveCandidate {
             thread_id: row.get(0)?,
             started_at: row.get(1)?,
             cwd: row.get(2)?,
@@ -705,17 +807,46 @@ fn resolve_threads(
             event_count: row.get::<_, i64>(7)? as usize,
             match_count: row.get::<_, i64>(8)? as usize,
             last_match_at: row.get(9)?,
+            project_exact: row.get::<_, i64>(10)? != 0,
+            project_contains: row.get::<_, i64>(11)? != 0,
+            cwd_contains: row.get::<_, i64>(12)? != 0,
+            path_contains: row.get::<_, i64>(13)? != 0,
+            summary_contains: row.get::<_, i64>(14)? != 0,
+            thread_id_contains: row.get::<_, i64>(15)? != 0,
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
+    let mut candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    candidates.sort_by(|left, right| compare_resolve_candidates(left, right));
+
+    Ok(candidates
+        .into_iter()
+        .take(limit)
+        .map(|item| {
+            let sort_reason = resolve_sort_reason(&item);
+            ThreadResolveResult {
+                thread_id: item.thread_id,
+                started_at: item.started_at,
+                cwd: item.cwd,
+                project_name: item.project_name,
+                summary: item.summary,
+                path: item.path,
+                message_count: item.message_count,
+                event_count: item.event_count,
+                match_count: item.match_count,
+                last_match_at: item.last_match_at,
+                sort_reason,
+            }
+        })
+        .collect())
 }
 
 fn read_thread(
     conn: &Connection,
     session_id: &str,
     limit: Option<usize>,
+    clean: bool,
+    max_message_chars: usize,
 ) -> Result<(ThreadSummary, Vec<ThreadMessage>)> {
     let thread = find_thread(conn, session_id)?;
     let sql = if limit.is_some() {
@@ -743,6 +874,8 @@ fn read_thread(
                 role: row.get(1)?,
                 phase: row.get(2)?,
                 text: row.get(3)?,
+                cleaned: false,
+                original_chars: None,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -753,12 +886,56 @@ fn read_thread(
                 role: row.get(1)?,
                 phase: row.get(2)?,
                 text: row.get(3)?,
+                cleaned: false,
+                original_chars: None,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
+    let messages = if clean {
+        messages
+            .into_iter()
+            .map(|message| clean_thread_message(message, max_message_chars))
+            .collect()
+    } else {
+        messages
+    };
+
     Ok((thread, messages))
+}
+
+fn recent_threads(conn: &Connection, args: &RecentThreadsArgs) -> Result<Vec<RecentThreadResult>> {
+    let cwd_filter = args.cwd.as_ref().map(|value| normalize_query(value));
+    let project_filter = args.project.as_ref().map(|value| normalize_query(value));
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT thread_id, started_at, cwd, project_name, summary, path, message_count, event_count
+        FROM threads
+        WHERE (?1 IS NULL OR instr(lower(COALESCE(cwd, '')), ?1) > 0)
+          AND (?2 IS NULL OR lower(COALESCE(project_name, '')) = ?2)
+        ORDER BY started_at DESC
+        LIMIT ?3
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![cwd_filter, project_filter, args.limit as i64],
+        |row| {
+            Ok(RecentThreadResult {
+                thread_id: row.get(0)?,
+                started_at: row.get(1)?,
+                cwd: row.get(2)?,
+                project_name: row.get(3)?,
+                summary: row.get(4)?,
+                path: row.get(5)?,
+                message_count: row.get::<_, i64>(6)? as usize,
+                event_count: row.get::<_, i64>(7)? as usize,
+            })
+        },
+    )?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn read_events(
@@ -1131,6 +1308,8 @@ fn extract_message(payload: &Value, timestamp: Option<String>) -> Option<ThreadM
         role,
         phase,
         text,
+        cleaned: false,
+        original_chars: None,
     })
 }
 
@@ -1211,6 +1390,126 @@ fn is_noise_message(role: &str, text: &str) -> bool {
         || trimmed.contains("## Compound Codex Tool Mapping")
         || trimmed.contains("<plugins_instructions>")
         || trimmed.contains("<skills_instructions>")
+}
+
+fn compare_resolve_candidates(
+    left: &ThreadResolveCandidate,
+    right: &ThreadResolveCandidate,
+) -> std::cmp::Ordering {
+    let left_structural = structural_score(left);
+    let right_structural = structural_score(right);
+    right_structural
+        .cmp(&left_structural)
+        .then_with(|| {
+            if left_structural > 0 || right_structural > 0 {
+                thread_activity(right).cmp(&thread_activity(left))
+            } else {
+                relevance_score(right).cmp(&relevance_score(left))
+            }
+        })
+        .then_with(|| relevance_score(right).cmp(&relevance_score(left)))
+        .then_with(|| thread_activity(right).cmp(&thread_activity(left)))
+}
+
+fn structural_score(candidate: &ThreadResolveCandidate) -> usize {
+    usize::from(candidate.project_exact) * 8
+        + usize::from(candidate.project_contains) * 5
+        + usize::from(candidate.cwd_contains) * 4
+        + usize::from(candidate.path_contains) * 2
+}
+
+fn relevance_score(candidate: &ThreadResolveCandidate) -> usize {
+    usize::from(candidate.thread_id_contains) * 5
+        + usize::from(candidate.summary_contains) * 3
+        + candidate.match_count.min(8)
+}
+
+fn thread_activity(candidate: &ThreadResolveCandidate) -> &str {
+    candidate
+        .last_match_at
+        .as_deref()
+        .or(candidate.started_at.as_deref())
+        .unwrap_or("")
+}
+
+fn resolve_sort_reason(candidate: &ThreadResolveCandidate) -> String {
+    let mut reasons = Vec::new();
+    if candidate.project_exact {
+        reasons.push("exact project");
+    } else if candidate.project_contains {
+        reasons.push("project match");
+    }
+    if candidate.cwd_contains {
+        reasons.push("cwd match");
+    }
+    if candidate.thread_id_contains {
+        reasons.push("thread id match");
+    }
+    if candidate.summary_contains {
+        reasons.push("summary match");
+    }
+    if candidate.match_count > 0 {
+        reasons.push("message hits");
+    }
+    if reasons.is_empty() {
+        reasons.push("recent");
+    }
+    reasons.join(", ")
+}
+
+fn clean_thread_message(mut message: ThreadMessage, max_message_chars: usize) -> ThreadMessage {
+    let original_chars = message.text.chars().count();
+    let trimmed = message.text.trim();
+
+    let replacement = if trimmed.starts_with("<skill>") {
+        let name = extract_tag(trimmed, "name");
+        let path = extract_tag(trimmed, "path");
+        Some(match (name, path) {
+            (Some(name), Some(path)) => format!("[skill payload omitted: {name} | {path}]"),
+            (Some(name), None) => format!("[skill payload omitted: {name}]"),
+            _ => "[skill payload omitted]".to_owned(),
+        })
+    } else if looks_like_pasted_context(trimmed) {
+        Some(format!(
+            "{}\n\n[pasted context collapsed: {} chars]",
+            one_line(trimmed, 280),
+            original_chars
+        ))
+    } else if original_chars > max_message_chars {
+        Some(format!(
+            "{}\n\n[truncated from {} chars]",
+            one_line(trimmed, max_message_chars.min(600)),
+            original_chars
+        ))
+    } else {
+        None
+    };
+
+    if let Some(text) = replacement {
+        message.text = text;
+        message.cleaned = true;
+        message.original_chars = Some(original_chars);
+    }
+
+    message
+}
+
+fn looks_like_pasted_context(text: &str) -> bool {
+    let line_count = text.lines().count();
+    text.starts_with("<skill>")
+        || text.starts_with("<environment_context>")
+        || text.contains("\n---\nname:")
+        || text.contains("## Install & Run")
+        || text.contains("### Browser-based")
+        || (line_count > 80 && text.contains("##"))
+}
+
+fn extract_tag(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].trim().to_owned())
 }
 
 fn normalize_query(query: &str) -> String {
@@ -1312,10 +1611,46 @@ mod tests {
 
         let threads = resolve_threads(&conn, "example-project", 10).unwrap();
         assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].sort_reason, "exact project, cwd match");
 
-        let (thread, messages) =
-            read_thread(&conn, "019d8510-9b67-7ff0-914c-cc313085e394", None).unwrap();
+        let recent = recent_threads(
+            &conn,
+            &RecentThreadsArgs {
+                limit: 5,
+                cwd: Some("/tmp/example-project".to_owned()),
+                project: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(recent.len(), 1);
+
+        let (thread, messages) = read_thread(
+            &conn,
+            "019d8510-9b67-7ff0-914c-cc313085e394",
+            None,
+            true,
+            1600,
+        )
+        .unwrap();
         assert_eq!(thread.message_count, 2);
         assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn clean_thread_message_collapses_skill_payloads() {
+        let message = ThreadMessage {
+            timestamp: None,
+            role: "user".to_owned(),
+            phase: None,
+            text: "<skill>\n<name>opencli-usage</name>\n<path>/tmp/opencli/SKILL.md</path>\n...</skill>"
+                .to_owned(),
+            cleaned: false,
+            original_chars: None,
+        };
+
+        let cleaned = clean_thread_message(message, 1600);
+        assert!(cleaned.cleaned);
+        assert!(cleaned.text.contains("skill payload omitted"));
+        assert!(cleaned.text.contains("opencli-usage"));
     }
 }
