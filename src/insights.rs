@@ -1,3 +1,5 @@
+const EXAMPLE_SESSION_SAMPLE_CAP: usize = 8;
+
 #[derive(Debug, Clone, Serialize)]
 struct InsightsMetadata {
     sessions_scanned: usize,
@@ -50,11 +52,14 @@ struct SuggestionCard {
 
 #[derive(Debug, Clone, Serialize)]
 struct EvidenceItem {
+    id: String,
+    thread_id: String,
     title: String,
     detail: String,
     project: String,
     mode: String,
     themes: Vec<String>,
+    confidence: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +73,8 @@ struct SignalCluster {
     label: String,
     count: usize,
     examples: Vec<String>,
+    evidence_ids: Vec<String>,
+    confidence: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,9 +91,124 @@ struct ExampleSession {
     thread_id: String,
     project: String,
     mode: String,
+    mode_confidence: String,
     themes: Vec<String>,
     objective: Option<String>,
     outcome: Option<String>,
+    outcome_strength: String,
+    outcome_confidence: String,
+    evidence_ids: Vec<String>,
+    classification_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BriefingSummary {
+    sessions_scanned: usize,
+    sessions_analyzed: usize,
+    example_sessions_are_samples: bool,
+    example_session_count: usize,
+    example_session_cap: usize,
+    project_filter: Option<String>,
+    dominant_project: Option<String>,
+    dominant_mode: Option<String>,
+    validated_sessions: usize,
+    iterative_sessions: usize,
+    sessions_with_failures: usize,
+    sessions_with_context_overload: usize,
+    top_themes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BriefingPatterns {
+    active_projects: Vec<AggregatedProject>,
+    dominant_modes: Vec<LabeledCount>,
+    recurring_themes: Vec<LabeledCount>,
+    recurring_success_patterns: Vec<SignalCluster>,
+    recurring_frictions: Vec<SignalCluster>,
+    tool_usage: Vec<LabeledCount>,
+    context_styles: Vec<LabeledCount>,
+    outcome_strengths: Vec<LabeledCount>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InsightsBriefing {
+    schema_version: String,
+    purpose: String,
+    summary: BriefingSummary,
+    patterns: BriefingPatterns,
+    evidence: Vec<EvidenceItem>,
+    example_sessions: Vec<ExampleSession>,
+    uncertainties: Vec<String>,
+    modeling_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SourceContract {
+    canonical_sources: Vec<String>,
+    noncanonical_sources: Vec<String>,
+    consumption_order: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CanonicalReceipt {
+    sessions_scanned: usize,
+    sessions_analyzed: usize,
+    example_sessions_are_samples: bool,
+    example_session_count: usize,
+    example_session_cap: usize,
+    dominant_project: Option<String>,
+    dominant_mode: Option<String>,
+    recurring_theme_labels: Vec<String>,
+    evidence_ids: Vec<String>,
+    recurring_friction_labels: Vec<String>,
+    recurring_success_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PatternTraceItem {
+    label: String,
+    count: usize,
+    confidence: String,
+    evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectTraceItem {
+    name: String,
+    session_count: usize,
+    dominant_modes: Vec<String>,
+    top_themes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EvidenceTraceItem {
+    id: String,
+    thread_id: String,
+    project: String,
+    mode: String,
+    confidence: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InsightsTrace {
+    canonical_receipt: CanonicalReceipt,
+    project_clusters: Vec<ProjectTraceItem>,
+    recurring_success_patterns: Vec<PatternTraceItem>,
+    recurring_frictions: Vec<PatternTraceItem>,
+    evidence_receipt: Vec<EvidenceTraceItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HeuristicDraft {
+    at_a_glance: AtAGlance,
+    work_areas: Vec<WorkArea>,
+    interaction_style: InteractionStyle,
+    what_works: Vec<InsightCard>,
+    friction: Vec<FrictionCard>,
+    suggestions: Vec<SuggestionCard>,
+    on_the_horizon: Vec<String>,
+    evidence: Vec<EvidenceItem>,
+    content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,14 +234,27 @@ struct AggregatedInsightsData {
 struct InsightsReport {
     metadata: InsightsMetadata,
     aggregated: AggregatedInsightsData,
+    briefing: InsightsBriefing,
+    source_contract: SourceContract,
+    trace: InsightsTrace,
+    heuristic_draft: HeuristicDraft,
+    #[serde(skip_serializing)]
     at_a_glance: AtAGlance,
+    #[serde(skip_serializing)]
     work_areas: Vec<WorkArea>,
+    #[serde(skip_serializing)]
     interaction_style: InteractionStyle,
+    #[serde(skip_serializing)]
     what_works: Vec<InsightCard>,
+    #[serde(skip_serializing)]
     friction: Vec<FrictionCard>,
+    #[serde(skip_serializing)]
     suggestions: Vec<SuggestionCard>,
+    #[serde(skip_serializing)]
     on_the_horizon: Vec<String>,
+    #[serde(skip_serializing)]
     evidence: Vec<EvidenceItem>,
+    #[serde(skip_serializing)]
     content: String,
 }
 
@@ -201,12 +336,15 @@ struct SessionFacets {
     session_id: String,
     project: String,
     primary_mode: SessionMode,
+    mode_confidence: String,
     themes: Vec<String>,
     tools_used: Vec<String>,
     success_signals: Vec<String>,
     friction_signals: Vec<String>,
     context_style: ContextStyle,
     outcome_strength: OutcomeStrength,
+    outcome_confidence: String,
+    classification_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1400,14 +1538,15 @@ fn build_global_insights_report(
     project_filter: Option<String>,
     report_path: &Path,
 ) -> InsightsReport {
-    let aggregated = aggregate_session_facets(analyses);
+    let evidence = build_global_evidence(analyses);
+    let evidence_index = build_evidence_index(&evidence);
+    let aggregated = aggregate_session_facets(analyses, &evidence_index);
     let work_areas = build_work_areas(&aggregated);
     let interaction_style = build_interaction_style(&aggregated, &work_areas);
     let what_works = build_what_works(&aggregated, &work_areas);
     let friction = build_friction_cards(&aggregated);
     let suggestions = build_suggestion_cards(&aggregated, &work_areas, &friction);
     let on_the_horizon = build_horizon_items(&aggregated, &work_areas);
-    let evidence = build_global_evidence(analyses);
     let at_a_glance = build_at_a_glance(
         &aggregated,
         &work_areas,
@@ -1421,6 +1560,33 @@ fn build_global_insights_report(
         project_filter,
         generated_report_path: report_path.display().to_string(),
     };
+    let briefing = build_insights_briefing(
+        &metadata,
+        &aggregated,
+        &evidence,
+        &analyses
+            .iter()
+            .take(EXAMPLE_SESSION_SAMPLE_CAP)
+            .map(|analysis| ExampleSession {
+                thread_id: analysis.fact.thread.thread_id.clone(),
+                project: analysis.facets.project.clone(),
+                mode: analysis.facets.primary_mode.label().to_owned(),
+                mode_confidence: analysis.facets.mode_confidence.clone(),
+                themes: analysis.facets.themes.clone(),
+                objective: analysis.fact.objective.clone(),
+                outcome: analysis.fact.outcome.clone(),
+                outcome_strength: analysis.facets.outcome_strength.label().to_owned(),
+                outcome_confidence: analysis.facets.outcome_confidence.clone(),
+                evidence_ids: evidence_index
+                    .get(&analysis.fact.thread.thread_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                classification_notes: analysis.facets.classification_notes.clone(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    let source_contract = build_source_contract();
+    let trace = build_insights_trace(&metadata, &aggregated, &evidence);
     let content = render_global_insights_content(
         &metadata,
         &at_a_glance,
@@ -1432,10 +1598,25 @@ fn build_global_insights_report(
         &on_the_horizon,
         &evidence,
     );
+    let heuristic_draft = HeuristicDraft {
+        at_a_glance: at_a_glance.clone(),
+        work_areas: work_areas.clone(),
+        interaction_style: interaction_style.clone(),
+        what_works: what_works.clone(),
+        friction: friction.clone(),
+        suggestions: suggestions.clone(),
+        on_the_horizon: on_the_horizon.clone(),
+        evidence: evidence.clone(),
+        content: content.clone(),
+    };
 
     InsightsReport {
         metadata,
         aggregated,
+        briefing,
+        source_contract,
+        trace,
+        heuristic_draft,
         at_a_glance,
         work_areas,
         interaction_style,
@@ -1448,29 +1629,250 @@ fn build_global_insights_report(
     }
 }
 
+fn build_source_contract() -> SourceContract {
+    SourceContract {
+        canonical_sources: vec![
+            "data.trace".to_owned(),
+            "data.briefing.summary".to_owned(),
+            "data.briefing.patterns".to_owned(),
+            "data.briefing.evidence".to_owned(),
+            "data.briefing.example_sessions".to_owned(),
+            "data.briefing.uncertainties".to_owned(),
+            "data.briefing.modeling_notes".to_owned(),
+        ],
+        noncanonical_sources: vec![
+            "data.heuristic_draft".to_owned(),
+            "data.heuristic_draft.content".to_owned(),
+        ],
+        consumption_order: vec![
+            "Read `data.trace` first to lock the current payload receipt and valid evidence ids."
+                .to_owned(),
+            "Use `data.briefing` as the canonical fact layer for counts, patterns, evidence, and uncertainty."
+                .to_owned(),
+            "Use `data.heuristic_draft` only as a wording/reference draft after the canonical narrative is already formed."
+                .to_owned(),
+        ],
+    }
+}
+
+fn build_insights_briefing(
+    metadata: &InsightsMetadata,
+    aggregated: &AggregatedInsightsData,
+    evidence: &[EvidenceItem],
+    example_sessions: &[ExampleSession],
+) -> InsightsBriefing {
+    let dominant_project = aggregated.active_projects.first().map(|item| item.name.clone());
+    let dominant_mode = aggregated.dominant_modes.first().map(|item| item.label.clone());
+    let top_themes = aggregated
+        .recurring_themes
+        .iter()
+        .take(5)
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
+    let uncertainties = build_briefing_uncertainties(metadata, aggregated);
+
+    InsightsBriefing {
+        schema_version: "insights-briefing-v1".to_owned(),
+        purpose: "Structured backend payload for model-written Codex insights reports."
+            .to_owned(),
+        summary: BriefingSummary {
+            sessions_scanned: metadata.sessions_scanned,
+            sessions_analyzed: metadata.sessions_analyzed,
+            example_sessions_are_samples: true,
+            example_session_count: example_sessions.len(),
+            example_session_cap: EXAMPLE_SESSION_SAMPLE_CAP,
+            project_filter: metadata.project_filter.clone(),
+            dominant_project,
+            dominant_mode,
+            validated_sessions: aggregated.validated_sessions,
+            iterative_sessions: aggregated.iterative_sessions,
+            sessions_with_failures: aggregated.sessions_with_failures,
+            sessions_with_context_overload: aggregated.sessions_with_context_overload,
+            top_themes,
+        },
+        patterns: BriefingPatterns {
+            active_projects: aggregated.active_projects.clone(),
+            dominant_modes: aggregated.dominant_modes.clone(),
+            recurring_themes: aggregated.recurring_themes.clone(),
+            recurring_success_patterns: aggregated.recurring_success_patterns.clone(),
+            recurring_frictions: aggregated.recurring_frictions.clone(),
+            tool_usage: aggregated.tool_usage.clone(),
+            context_styles: aggregated.context_styles.clone(),
+            outcome_strengths: aggregated.outcome_strengths.clone(),
+        },
+        evidence: evidence.to_vec(),
+        example_sessions: example_sessions.to_vec(),
+        uncertainties,
+        modeling_notes: vec![
+            "Use recurring patterns and evidence as the source of truth; treat the human-facing `content` field as a heuristic draft, not canonical analysis.".to_owned(),
+            "Prefer project/mode/theme clusters over raw tool frequency when writing narrative sections.".to_owned(),
+            "Call out uncertainty explicitly when low-execution-evidence or context-overload signals are high.".to_owned(),
+        ],
+    }
+}
+
+fn build_evidence_index(evidence: &[EvidenceItem]) -> HashMap<String, Vec<String>> {
+    let mut index = HashMap::new();
+    for item in evidence {
+        index
+            .entry(item.thread_id.clone())
+            .or_insert_with(Vec::new)
+            .push(item.id.clone());
+    }
+    index
+}
+
+fn build_insights_trace(
+    metadata: &InsightsMetadata,
+    aggregated: &AggregatedInsightsData,
+    evidence: &[EvidenceItem],
+) -> InsightsTrace {
+    InsightsTrace {
+        canonical_receipt: CanonicalReceipt {
+            sessions_scanned: metadata.sessions_scanned,
+            sessions_analyzed: metadata.sessions_analyzed,
+            example_sessions_are_samples: true,
+            example_session_count: aggregated.example_sessions.len(),
+            example_session_cap: EXAMPLE_SESSION_SAMPLE_CAP,
+            dominant_project: aggregated.active_projects.first().map(|item| item.name.clone()),
+            dominant_mode: aggregated.dominant_modes.first().map(|item| item.label.clone()),
+            recurring_theme_labels: aggregated
+                .recurring_themes
+                .iter()
+                .map(|item| item.label.clone())
+                .collect(),
+            evidence_ids: evidence.iter().map(|item| item.id.clone()).collect(),
+            recurring_friction_labels: aggregated
+                .recurring_frictions
+                .iter()
+                .map(|item| item.label.clone())
+                .collect(),
+            recurring_success_labels: aggregated
+                .recurring_success_patterns
+                .iter()
+                .map(|item| item.label.clone())
+                .collect(),
+        },
+        project_clusters: aggregated
+            .active_projects
+            .iter()
+            .map(|item| ProjectTraceItem {
+                name: item.name.clone(),
+                session_count: item.session_count,
+                dominant_modes: item.dominant_modes.clone(),
+                top_themes: item.top_themes.clone(),
+            })
+            .collect(),
+        recurring_success_patterns: aggregated
+            .recurring_success_patterns
+            .iter()
+            .map(|item| PatternTraceItem {
+                label: item.label.clone(),
+                count: item.count,
+                confidence: item.confidence.clone(),
+                evidence_ids: item.evidence_ids.clone(),
+            })
+            .collect(),
+        recurring_frictions: aggregated
+            .recurring_frictions
+            .iter()
+            .map(|item| PatternTraceItem {
+                label: item.label.clone(),
+                count: item.count,
+                confidence: item.confidence.clone(),
+                evidence_ids: item.evidence_ids.clone(),
+            })
+            .collect(),
+        evidence_receipt: evidence
+            .iter()
+            .map(|item| EvidenceTraceItem {
+                id: item.id.clone(),
+                thread_id: item.thread_id.clone(),
+                project: item.project.clone(),
+                mode: item.mode.clone(),
+                confidence: item.confidence.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn build_briefing_uncertainties(
+    metadata: &InsightsMetadata,
+    aggregated: &AggregatedInsightsData,
+) -> Vec<String> {
+    let mut uncertainties = Vec::new();
+
+    if aggregated.example_sessions.len() < metadata.sessions_analyzed {
+        uncertainties.push(format!(
+            "Example sessions are capped at {} items for display; use `sessions_analyzed` as the real denominator for narrative claims.",
+            EXAMPLE_SESSION_SAMPLE_CAP
+        ));
+    }
+    if aggregated.sessions_with_context_overload > 0 {
+        uncertainties.push(
+            "Some sessions begin with pasted handoffs or collapsed context, so objective/theme inference may reflect summary artifacts as well as direct user intent."
+                .to_owned(),
+        );
+    }
+    if aggregated
+        .recurring_frictions
+        .iter()
+        .any(|item| item.label == "Low execution evidence")
+    {
+        uncertainties.push(
+            "A share of analyzed sessions lacks direct command/tool evidence, so outcome strength is partly inferred from thread endings rather than explicit validation."
+                .to_owned(),
+        );
+    }
+    if aggregated.sessions_with_failures > 0 && aggregated.validated_sessions == 0 {
+        uncertainties.push(
+            "This sample shows failures without successful validations, which can overstate friction relative to the broader archive."
+                .to_owned(),
+        );
+    }
+
+    uncertainties
+}
+
 fn build_session_facets(fact: &SessionFact) -> SessionFacets {
     let primary_mode = classify_primary_mode(fact);
     let tools_used = extract_tools_used(fact);
     let outcome_strength = classify_outcome_strength(fact, &tools_used);
     let context_style = classify_context_style(fact);
     let themes = extract_themes(fact, &primary_mode);
+    let mode_confidence = classify_mode_confidence(fact, &primary_mode);
+    let outcome_confidence = classify_outcome_confidence(fact, &outcome_strength);
     let success_signals = extract_success_signals(fact, &tools_used, &outcome_strength);
     let friction_signals = extract_friction_signals(fact, &outcome_strength);
+    let classification_notes = build_classification_notes(
+        fact,
+        &primary_mode,
+        &mode_confidence,
+        &themes,
+        &outcome_strength,
+        &outcome_confidence,
+    );
 
     SessionFacets {
         session_id: fact.thread.thread_id.clone(),
         project: session_project_name(fact),
         primary_mode,
+        mode_confidence,
         themes,
         tools_used,
         success_signals,
         friction_signals,
         context_style,
         outcome_strength,
+        outcome_confidence,
+        classification_notes,
     }
 }
 
-fn aggregate_session_facets(analyses: &[SessionAnalysis]) -> AggregatedInsightsData {
+fn aggregate_session_facets(
+    analyses: &[SessionAnalysis],
+    evidence_index: &HashMap<String, Vec<String>>,
+) -> AggregatedInsightsData {
     let mut project_groups: HashMap<String, Vec<&SessionAnalysis>> = HashMap::new();
     let mut mode_counts = HashMap::new();
     let mut theme_counts = HashMap::new();
@@ -1481,6 +1883,8 @@ fn aggregate_session_facets(analyses: &[SessionAnalysis]) -> AggregatedInsightsD
     let mut success_counts = HashMap::new();
     let mut friction_examples: HashMap<String, Vec<String>> = HashMap::new();
     let mut success_examples: HashMap<String, Vec<String>> = HashMap::new();
+    let mut friction_evidence_ids: HashMap<String, Vec<String>> = HashMap::new();
+    let mut success_evidence_ids: HashMap<String, Vec<String>> = HashMap::new();
     let mut example_sessions = Vec::new();
     let mut validated_sessions = 0usize;
     let mut iterative_sessions = 0usize;
@@ -1515,10 +1919,22 @@ fn aggregate_session_facets(analyses: &[SessionAnalysis]) -> AggregatedInsightsD
                 best_session_example(fact),
                 3,
             );
+            push_cluster_evidence_ids(
+                &mut friction_evidence_ids,
+                signal,
+                evidence_index.get(&fact.thread.thread_id),
+                4,
+            );
         }
         for signal in &facets.success_signals {
             increment_count(&mut success_counts, signal);
             push_cluster_example(&mut success_examples, signal, best_session_example(fact), 3);
+            push_cluster_evidence_ids(
+                &mut success_evidence_ids,
+                signal,
+                evidence_index.get(&fact.thread.thread_id),
+                4,
+            );
         }
 
         if fact.command_successes > 0 {
@@ -1537,14 +1953,22 @@ fn aggregate_session_facets(analyses: &[SessionAnalysis]) -> AggregatedInsightsD
             sessions_with_context_overload += 1;
         }
 
-        if example_sessions.len() < 8 {
+        if example_sessions.len() < EXAMPLE_SESSION_SAMPLE_CAP {
             example_sessions.push(ExampleSession {
                 thread_id: fact.thread.thread_id.clone(),
                 project,
                 mode: facets.primary_mode.label().to_owned(),
+                mode_confidence: facets.mode_confidence.clone(),
                 themes: facets.themes.clone(),
                 objective: fact.objective.clone(),
                 outcome: fact.outcome.clone(),
+                outcome_strength: facets.outcome_strength.label().to_owned(),
+                outcome_confidence: facets.outcome_confidence.clone(),
+                evidence_ids: evidence_index
+                    .get(&fact.thread.thread_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                classification_notes: facets.classification_notes.clone(),
             });
         }
     }
@@ -1588,8 +2012,18 @@ fn aggregate_session_facets(analyses: &[SessionAnalysis]) -> AggregatedInsightsD
         active_projects,
         dominant_modes: sorted_counts(&mode_counts, 6),
         recurring_themes: sorted_counts(&theme_counts, 8),
-        recurring_frictions: sorted_clusters(&friction_counts, &friction_examples, 4),
-        recurring_success_patterns: sorted_clusters(&success_counts, &success_examples, 4),
+        recurring_frictions: sorted_clusters(
+            &friction_counts,
+            &friction_examples,
+            &friction_evidence_ids,
+            4,
+        ),
+        recurring_success_patterns: sorted_clusters(
+            &success_counts,
+            &success_examples,
+            &success_evidence_ids,
+            4,
+        ),
         tool_usage: sorted_counts(&tool_counts, 8),
         context_styles: sorted_counts(&context_counts, 3),
         outcome_strengths: sorted_counts(&outcome_counts, 3),
@@ -1966,6 +2400,169 @@ fn classify_outcome_strength(fact: &SessionFact, tools_used: &[String]) -> Outco
     }
 }
 
+fn classify_mode_confidence(fact: &SessionFact, primary_mode: &SessionMode) -> String {
+    let text = session_text_blob(fact);
+    let matched = mode_keywords(primary_mode)
+        .iter()
+        .filter(|needle| text.contains(**needle))
+        .count();
+    let confidence = if matched >= 2
+        || (matches!(primary_mode, SessionMode::Implementation) && fact.command_successes > 0)
+        || (matches!(primary_mode, SessionMode::Debugging) && fact.command_failures > 0)
+    {
+        "high"
+    } else if matched >= 1 || fact.substantive_user_messages >= 2 {
+        "medium"
+    } else {
+        "low"
+    };
+
+    confidence.to_owned()
+}
+
+fn classify_outcome_confidence(
+    fact: &SessionFact,
+    outcome_strength: &OutcomeStrength,
+) -> String {
+    let confidence = match outcome_strength {
+        OutcomeStrength::Strong if fact.command_successes > 0 && fact.command_failures == 0 => {
+            "high"
+        }
+        OutcomeStrength::Partial if fact.outcome.is_some() || fact.command_successes > 0 => "medium",
+        OutcomeStrength::Weak if fact.outcome.is_none() && fact.command_successes == 0 => "medium",
+        _ => "low",
+    };
+
+    confidence.to_owned()
+}
+
+fn build_classification_notes(
+    fact: &SessionFact,
+    primary_mode: &SessionMode,
+    mode_confidence: &str,
+    themes: &[String],
+    outcome_strength: &OutcomeStrength,
+    outcome_confidence: &str,
+) -> Vec<String> {
+    let text = session_text_blob(fact);
+    let mut notes = Vec::new();
+    let matched_mode_keywords = mode_keywords(primary_mode)
+        .iter()
+        .filter(|needle| text.contains(**needle))
+        .copied()
+        .collect::<Vec<_>>();
+    if matched_mode_keywords.is_empty() {
+        notes.push(format!(
+            "Mode classified as {} with {} confidence based on execution shape rather than explicit keywords.",
+            primary_mode.label(),
+            mode_confidence
+        ));
+    } else {
+        notes.push(format!(
+            "Mode classified as {} with {} confidence because the session mentions {}.",
+            primary_mode.label(),
+            mode_confidence,
+            matched_mode_keywords.join(", ")
+        ));
+    }
+
+    if !themes.is_empty() {
+        notes.push(format!(
+            "Themes selected from repeated objective/request terms and execution evidence: {}.",
+            themes.join(", ")
+        ));
+    }
+
+    let outcome_basis = match outcome_strength {
+        OutcomeStrength::Strong => {
+            "detected outcome text plus successful validation without observed failures"
+        }
+        OutcomeStrength::Partial => "detected outcome text or partial validation evidence",
+        OutcomeStrength::Weak => "lack of explicit outcome or direct validation evidence",
+    };
+    notes.push(format!(
+        "Outcome classified as {} with {} confidence based on {}.",
+        outcome_strength.label(),
+        outcome_confidence,
+        outcome_basis
+    ));
+
+    if fact.cleaned_context_messages > 0 {
+        notes.push(
+            "Collapsed or pasted context was present, so objective/theme inference may be influenced by summary artifacts."
+                .to_owned(),
+        );
+    }
+
+    notes
+}
+
+fn mode_keywords(mode: &SessionMode) -> &'static [&'static str] {
+    match mode {
+        SessionMode::Research => &[
+            "research",
+            "analyze",
+            "analysis",
+            "understand",
+            "read",
+            "summarize",
+            "reference",
+            "compare",
+            "insight",
+        ],
+        SessionMode::Planning => &[
+            "plan",
+            "planning",
+            "handoff",
+            "design",
+            "spec",
+            "roadmap",
+            "break down",
+            "architecture",
+        ],
+        SessionMode::Implementation => &[
+            "implement",
+            "build",
+            "create",
+            "add",
+            "write",
+            "update",
+            "refactor",
+            "feature",
+            "ship",
+        ],
+        SessionMode::Debugging => &[
+            "debug",
+            "fix",
+            "failing",
+            "failure",
+            "error",
+            "broken",
+            "bug",
+            "regression",
+            "panic",
+            "exception",
+        ],
+        SessionMode::Review => &[
+            "review",
+            "audit",
+            "critique",
+            "regression risk",
+            "findings",
+            "pull request",
+            "pr",
+            "diff",
+        ],
+        SessionMode::Exploratory => &[
+            "explore",
+            "exploratory",
+            "brainstorm",
+            "idea",
+            "investigate",
+        ],
+    }
+}
+
 fn session_text_blob(fact: &SessionFact) -> String {
     [
         fact.thread.summary.as_deref(),
@@ -2014,6 +2611,26 @@ fn push_cluster_example(
     }
 }
 
+fn push_cluster_evidence_ids(
+    clusters: &mut HashMap<String, Vec<String>>,
+    label: &str,
+    evidence_ids: Option<&Vec<String>>,
+    limit: usize,
+) {
+    let Some(evidence_ids) = evidence_ids else {
+        return;
+    };
+    let bucket = clusters.entry(label.to_owned()).or_default();
+    for evidence_id in evidence_ids {
+        if bucket.len() >= limit {
+            break;
+        }
+        if !bucket.contains(evidence_id) {
+            bucket.push(evidence_id.clone());
+        }
+    }
+}
+
 fn sorted_counts(counts: &HashMap<String, usize>, limit: usize) -> Vec<LabeledCount> {
     let mut entries = counts
         .iter()
@@ -2042,6 +2659,7 @@ fn sorted_count_labels(counts: &HashMap<String, usize>, limit: usize) -> Vec<Str
 fn sorted_clusters(
     counts: &HashMap<String, usize>,
     examples: &HashMap<String, Vec<String>>,
+    evidence_ids: &HashMap<String, Vec<String>>,
     limit: usize,
 ) -> Vec<SignalCluster> {
     let mut entries = counts
@@ -2050,6 +2668,8 @@ fn sorted_clusters(
             label: label.clone(),
             count: *count,
             examples: examples.get(label).cloned().unwrap_or_default(),
+            evidence_ids: evidence_ids.get(label).cloned().unwrap_or_default(),
+            confidence: cluster_confidence(*count).to_owned(),
         })
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| {
@@ -2060,6 +2680,16 @@ fn sorted_clusters(
     });
     entries.truncate(limit);
     entries
+}
+
+fn cluster_confidence(count: usize) -> &'static str {
+    if count >= 4 {
+        "high"
+    } else if count >= 2 {
+        "medium"
+    } else {
+        "low"
+    }
 }
 
 fn add_keyword_score(
@@ -2363,7 +2993,8 @@ fn build_global_evidence(analyses: &[SessionAnalysis]) -> Vec<EvidenceItem> {
     analyses
         .iter()
         .take(6)
-        .map(|analysis| {
+        .enumerate()
+        .map(|(index, analysis)| {
             let fact = &analysis.fact;
             let facets = &analysis.facets;
             let title = fact
@@ -2383,14 +3014,27 @@ fn build_global_evidence(analyses: &[SessionAnalysis]) -> Vec<EvidenceItem> {
             }
 
             EvidenceItem {
+                id: format!("evidence-{}", index + 1),
+                thread_id: fact.thread.thread_id.clone(),
                 title: one_line(&title, 96),
                 detail: parts.join(" "),
                 project: facets.project.clone(),
                 mode: facets.primary_mode.label().to_owned(),
                 themes: facets.themes.clone(),
+                confidence: evidence_confidence(fact, facets).to_owned(),
             }
         })
         .collect()
+}
+
+fn evidence_confidence(fact: &SessionFact, facets: &SessionFacets) -> &'static str {
+    if fact.command_successes > 0 && matches!(facets.outcome_strength, OutcomeStrength::Strong) {
+        "high"
+    } else if fact.outcome.is_some() || !fact.key_actions.is_empty() {
+        "medium"
+    } else {
+        "low"
+    }
 }
 
 fn build_at_a_glance(

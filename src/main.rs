@@ -1986,7 +1986,9 @@ mod tests {
         let c = sample_analysis("3", "mnemo", "plan handoff for insight parity");
         let d = sample_analysis("4", "physedit", "review regression risks in search");
 
-        let aggregated = aggregate_session_facets(&[a, b, c, d]);
+        let analyses = vec![a, b, c, d];
+        let evidence = build_global_evidence(&analyses);
+        let aggregated = aggregate_session_facets(&analyses, &build_evidence_index(&evidence));
         assert_eq!(aggregated.active_projects[0].name, "mnemo");
         assert!(
             aggregated
@@ -1995,14 +1997,24 @@ mod tests {
                 .any(|item| item.label == "Execution friction" && item.count >= 2)
         );
         assert!(!aggregated.dominant_modes.is_empty());
+        assert!(
+            aggregated
+                .recurring_frictions
+                .iter()
+                .any(|item| !item.evidence_ids.is_empty())
+        );
     }
 
     #[test]
     fn generate_insights_html_escapes_and_renders_navigation() {
-        let aggregated = aggregate_session_facets(&[
+        let analyses = vec![
             sample_analysis("1", "mnemo", "plan <script> report"),
             sample_analysis("2", "opensource", "implement html cards"),
-        ]);
+        ];
+        let aggregated = aggregate_session_facets(
+            &analyses,
+            &build_evidence_index(&build_global_evidence(&analyses)),
+        );
         let work_areas = build_work_areas(&aggregated);
         let interaction_style = build_interaction_style(&aggregated, &work_areas);
         let what_works = build_what_works(&aggregated, &work_areas);
@@ -2010,30 +2022,86 @@ mod tests {
         let suggestions = build_suggestion_cards(&aggregated, &work_areas, &friction);
         let on_the_horizon = build_horizon_items(&aggregated, &work_areas);
         let evidence = vec![EvidenceItem {
+            id: "evidence-1".to_owned(),
+            thread_id: "1".to_owned(),
             title: "plan <script> report".to_owned(),
             detail: "Request: tighten <b>html</b> report".to_owned(),
             project: "mnemo&co".to_owned(),
             mode: "Planning".to_owned(),
             themes: vec!["Reporting & insights".to_owned()],
+            confidence: "medium".to_owned(),
         }];
+        let metadata = InsightsMetadata {
+            sessions_scanned: 7,
+            sessions_analyzed: 2,
+            project_filter: None,
+            generated_report_path: "/tmp/report&<test>.html".to_owned(),
+        };
+        let trace_aggregated =
+            aggregate_session_facets(&analyses, &build_evidence_index(&evidence));
+        let briefing = build_insights_briefing(
+            &metadata,
+            &trace_aggregated,
+            &evidence,
+            &[
+                ExampleSession {
+                    thread_id: "1".to_owned(),
+                    project: "mnemo".to_owned(),
+                    mode: "Planning".to_owned(),
+                    mode_confidence: "high".to_owned(),
+                    themes: vec!["Reporting & insights".to_owned()],
+                    objective: Some("plan <script> report".to_owned()),
+                    outcome: None,
+                    outcome_strength: "Partial outcome".to_owned(),
+                    outcome_confidence: "medium".to_owned(),
+                    evidence_ids: vec!["evidence-1".to_owned()],
+                    classification_notes: vec![
+                        "Mode classified from planning keywords.".to_owned(),
+                    ],
+                },
+                ExampleSession {
+                    thread_id: "2".to_owned(),
+                    project: "opensource".to_owned(),
+                    mode: "Implementation".to_owned(),
+                    mode_confidence: "high".to_owned(),
+                    themes: vec!["Frontend & HTML".to_owned()],
+                    objective: Some("implement html cards".to_owned()),
+                    outcome: Some("done".to_owned()),
+                    outcome_strength: "Strong outcome".to_owned(),
+                    outcome_confidence: "high".to_owned(),
+                    evidence_ids: vec![],
+                    classification_notes: vec![
+                        "Outcome classified from successful delivery.".to_owned(),
+                    ],
+                },
+            ],
+        );
+        let at_a_glance = build_at_a_glance(
+            &trace_aggregated,
+            &work_areas,
+            &interaction_style,
+            &friction,
+            &suggestions,
+        );
+        let heuristic_draft = HeuristicDraft {
+            at_a_glance: at_a_glance.clone(),
+            work_areas: work_areas.clone(),
+            interaction_style: interaction_style.clone(),
+            what_works: what_works.clone(),
+            friction: friction.clone(),
+            suggestions: suggestions.clone(),
+            on_the_horizon: on_the_horizon.clone(),
+            evidence: evidence.clone(),
+            content: String::new(),
+        };
         let report = InsightsReport {
-            metadata: InsightsMetadata {
-                sessions_scanned: 7,
-                sessions_analyzed: 2,
-                project_filter: None,
-                generated_report_path: "/tmp/report&<test>.html".to_owned(),
-            },
+            metadata: metadata.clone(),
             aggregated,
-            at_a_glance: build_at_a_glance(
-                &aggregate_session_facets(&[
-                    sample_analysis("1", "mnemo", "plan <script> report"),
-                    sample_analysis("2", "opensource", "implement html cards"),
-                ]),
-                &work_areas,
-                &interaction_style,
-                &friction,
-                &suggestions,
-            ),
+            briefing,
+            source_contract: build_source_contract(),
+            trace: build_insights_trace(&metadata, &trace_aggregated, &evidence),
+            heuristic_draft,
+            at_a_glance,
             work_areas,
             interaction_style,
             what_works,
@@ -2066,7 +2134,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let aggregated = aggregate_session_facets(&analyses);
+        let evidence = build_global_evidence(&analyses);
+        let aggregated = aggregate_session_facets(&analyses, &build_evidence_index(&evidence));
         let work_areas = build_work_areas(&aggregated);
         let interaction_style = build_interaction_style(&aggregated, &work_areas);
         let friction = build_friction_cards(&aggregated);
@@ -2082,5 +2151,184 @@ mod tests {
         assert_eq!(aggregated.analyzed_session_count, 12);
         assert_eq!(aggregated.example_sessions.len(), 8);
         assert!(glance.whats_working.contains("12 analyzed sessions"));
+    }
+
+    #[test]
+    fn build_insights_briefing_exposes_backend_payload() {
+        let mut context_heavy = sample_analysis("1", "mnemo", "implement insights backend");
+        context_heavy.fact.cleaned_context_messages = 1;
+        context_heavy.facets = build_session_facets(&context_heavy.fact);
+        let analyses = vec![
+            context_heavy,
+            sample_analysis("2", "opensource", "plan report generation"),
+            sample_analysis("3", "mnemo", "review repeated friction"),
+        ];
+        let evidence = build_global_evidence(&analyses);
+        let aggregated = aggregate_session_facets(&analyses, &build_evidence_index(&evidence));
+        let metadata = InsightsMetadata {
+            sessions_scanned: 9,
+            sessions_analyzed: analyses.len(),
+            project_filter: None,
+            generated_report_path: "/tmp/report.html".to_owned(),
+        };
+        let briefing = build_insights_briefing(
+            &metadata,
+            &aggregated,
+            &evidence,
+            &aggregated.example_sessions,
+        );
+
+        assert_eq!(briefing.schema_version, "insights-briefing-v1");
+        assert_eq!(briefing.summary.sessions_analyzed, 3);
+        assert!(briefing.summary.example_sessions_are_samples);
+        assert_eq!(briefing.summary.example_session_count, 3);
+        assert_eq!(
+            briefing.summary.example_session_cap,
+            EXAMPLE_SESSION_SAMPLE_CAP
+        );
+        assert_eq!(
+            briefing.patterns.active_projects.len(),
+            aggregated.active_projects.len()
+        );
+        assert!(!briefing.modeling_notes.is_empty());
+        assert!(!briefing.uncertainties.is_empty());
+        assert!(
+            briefing
+                .patterns
+                .recurring_frictions
+                .iter()
+                .all(|item| !item.confidence.is_empty())
+        );
+        assert!(
+            briefing
+                .example_sessions
+                .iter()
+                .all(|item| !item.classification_notes.is_empty())
+        );
+        assert!(
+            briefing
+                .evidence
+                .iter()
+                .all(|item| !item.id.is_empty() && !item.confidence.is_empty())
+        );
+    }
+
+    #[test]
+    fn insights_report_json_exposes_contract_and_hides_internal_sections() {
+        let analyses = vec![
+            sample_analysis("1", "mnemo", "plan insights backend"),
+            sample_analysis("2", "opensource", "implement trace receipt"),
+            sample_analysis("3", "mnemo", "review sample-only semantics"),
+        ];
+        let report =
+            build_global_insights_report(&analyses, 9, None, Path::new("/tmp/report.html"));
+        let json = serde_json::to_value(&report).expect("serialize report");
+        let object = json.as_object().expect("report json object");
+
+        for key in [
+            "metadata",
+            "aggregated",
+            "briefing",
+            "source_contract",
+            "trace",
+            "heuristic_draft",
+        ] {
+            assert!(object.contains_key(key), "missing serialized key: {key}");
+        }
+
+        for hidden_key in [
+            "at_a_glance",
+            "work_areas",
+            "interaction_style",
+            "what_works",
+            "friction",
+            "suggestions",
+            "on_the_horizon",
+            "evidence",
+            "content",
+        ] {
+            assert!(
+                !object.contains_key(hidden_key),
+                "internal key should be skipped: {hidden_key}"
+            );
+        }
+
+        assert_eq!(
+            json["source_contract"]["canonical_sources"][0],
+            "data.trace"
+        );
+        assert_eq!(
+            json["trace"]["canonical_receipt"]["example_sessions_are_samples"],
+            true
+        );
+        assert_eq!(
+            json["trace"]["canonical_receipt"]["example_session_cap"],
+            EXAMPLE_SESSION_SAMPLE_CAP as u64
+        );
+        assert!(json["heuristic_draft"].is_object());
+    }
+
+    #[test]
+    fn trace_receipt_matches_pattern_and_evidence_payloads() {
+        let analyses = vec![
+            sample_analysis("1", "mnemo", "implement insights backend"),
+            sample_analysis("2", "opensource", "plan report generation"),
+            sample_analysis("3", "mnemo", "review repeated friction"),
+        ];
+        let report =
+            build_global_insights_report(&analyses, 11, None, Path::new("/tmp/report.html"));
+
+        let receipt = &report.trace.canonical_receipt;
+        let evidence_ids = report
+            .trace
+            .evidence_receipt
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        let success_labels = report
+            .trace
+            .recurring_success_patterns
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        let friction_labels = report
+            .trace
+            .recurring_frictions
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(receipt.sessions_scanned, 11);
+        assert_eq!(receipt.sessions_analyzed, analyses.len());
+        assert!(receipt.example_sessions_are_samples);
+        assert_eq!(
+            receipt.example_session_count,
+            report.aggregated.example_sessions.len()
+        );
+        assert_eq!(receipt.example_session_cap, EXAMPLE_SESSION_SAMPLE_CAP);
+        assert_eq!(
+            receipt
+                .evidence_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            evidence_ids
+        );
+        assert_eq!(
+            receipt
+                .recurring_success_labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            success_labels
+        );
+        assert_eq!(
+            receipt
+                .recurring_friction_labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            friction_labels
+        );
     }
 }

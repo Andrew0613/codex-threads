@@ -11,16 +11,18 @@ This skill is for the report-writing workflow, not thread lookup. If you need to
 
 ## Truth Source
 
-Use `--json insights` and treat `data.briefing` as the canonical backend payload.
+Use `--json insights` and treat `data.trace` plus `data.briefing` as the canonical backend payload.
 
 - Prefer:
+  - `data.source_contract`
+  - `data.trace`
   - `data.briefing.summary`
   - `data.briefing.patterns`
   - `data.briefing.evidence`
   - `data.briefing.example_sessions`
   - `data.briefing.uncertainties`
   - `data.briefing.modeling_notes`
-- Treat `data.content` as a heuristic draft only.
+- Treat `data.heuristic_draft` as a heuristic draft only.
 - Do not use `example_sessions.len()` as the analyzed-session denominator; use `sessions_analyzed`.
 
 ## Default Flow
@@ -37,6 +39,8 @@ cargo run -- --json doctor
 cargo run -- sync
 ```
 
+Run `sync` when the doctor output says the index is missing or stale, when recent sessions you expect are absent from `insights`, or after archive files changed since the last report run. Do not run it by reflex if `doctor` is healthy and the payload already reflects the sessions you need.
+
 3. Generate the structured insights payload.
 
 ```bash
@@ -49,6 +53,18 @@ cargo run -- --json insights --limit 20
 cargo run -- --json insights --project <project-name> --limit 20
 ```
 
+## Canonical Consumption Order
+
+1. Read `data.source_contract`.
+2. Read `data.trace` and lock:
+   - valid evidence ids
+   - valid recurring friction labels
+   - valid recurring success labels
+   - current analyzed-session denominator
+   - whether `example_sessions` is sample-only and what the current sample cap is
+3. Read `data.briefing` for the actual fact layer.
+4. Only after the narrative is already formed, optionally read `data.heuristic_draft` for wording ideas.
+
 ## How To Write The Report
 
 - Base conclusions on recurring patterns, not one sample session.
@@ -56,7 +72,7 @@ cargo run -- --json insights --project <project-name> --limit 20
 - Use `confidence`, `classification_notes`, and `uncertainties` to calibrate claims.
 - Use `pattern.evidence_ids` to connect narrative claims back to `evidence`.
 - Keep quoted evidence short; summarize long transcript fragments instead of repeating them.
-- If `data.content` conflicts with `data.briefing`, trust `data.briefing`.
+- If `data.heuristic_draft` conflicts with `data.trace` or `data.briefing`, trust `data.trace` and `data.briefing`.
 
 ## Recommended Sections
 
@@ -75,3 +91,7 @@ cargo run -- --json insights --project <project-name> --limit 20
 - Do not treat tool counts as a full explanation of behavior.
 - Do not hide uncertainty when `Low execution evidence` or `Context overload` is high.
 - Do not overfit on one active project if the analyzed set spans several projects.
+- Do not cite any evidence id that is not present in `data.trace.canonical_receipt.evidence_ids`.
+- Do not cite any recurring pattern that is not present in `data.trace`.
+- Do not assume `example_sessions` is exhaustive; confirm `data.trace.canonical_receipt.example_sessions_are_samples` and use `example_session_cap` only as display metadata.
+- Do not treat `example_sessions` as the full analyzed set; they are display samples only.
