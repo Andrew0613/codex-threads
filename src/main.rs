@@ -267,1873 +267,7 @@ struct ThreadInsight {
     content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct InsightsMetadata {
-    sessions_scanned: usize,
-    sessions_analyzed: usize,
-    project_filter: Option<String>,
-    generated_report_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AtAGlance {
-    whats_working: String,
-    whats_hindering: String,
-    quick_wins: String,
-    ambitious_workflows: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct WorkArea {
-    name: String,
-    session_count: usize,
-    description: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct InteractionStyle {
-    narrative: String,
-    key_pattern: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct InsightCard {
-    title: String,
-    detail: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct FrictionCard {
-    category: String,
-    detail: String,
-    examples: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SuggestionCard {
-    title: String,
-    detail: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct InsightsReport {
-    metadata: InsightsMetadata,
-    at_a_glance: AtAGlance,
-    work_areas: Vec<WorkArea>,
-    interaction_style: InteractionStyle,
-    what_works: Vec<InsightCard>,
-    friction: Vec<FrictionCard>,
-    suggestions: Vec<SuggestionCard>,
-    on_the_horizon: Vec<String>,
-    evidence: Vec<String>,
-    content: String,
-}
-
-#[derive(Debug, Clone)]
-struct SessionFact {
-    thread: ThreadSummary,
-    objective: Option<String>,
-    outcome: Option<String>,
-    key_requests: Vec<String>,
-    key_actions: Vec<EventSummaryItem>,
-    substantive_user_messages: usize,
-    cleaned_context_messages: usize,
-    command_successes: usize,
-    command_failures: usize,
-}
-
-#[derive(Debug, Clone)]
-struct ThreadResolveCandidate {
-    thread_id: String,
-    started_at: Option<String>,
-    cwd: Option<String>,
-    project_name: Option<String>,
-    summary: Option<String>,
-    path: String,
-    message_count: usize,
-    event_count: usize,
-    match_count: usize,
-    last_match_at: Option<String>,
-    project_exact: bool,
-    project_contains: bool,
-    cwd_contains: bool,
-    path_contains: bool,
-    summary_contains: bool,
-    thread_id_contains: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EventItem {
-    timestamp: Option<String>,
-    kind: String,
-    event_type: Option<String>,
-    summary: Option<String>,
-    payload: Value,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct EventSummaryItem {
-    timestamp: Option<String>,
-    category: String,
-    detail: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SyncReport {
-    sessions_root: String,
-    db_path: String,
-    scanned: usize,
-    indexed: usize,
-    updated: usize,
-    unchanged: usize,
-    removed: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct DoctorReport {
-    sessions_root: String,
-    db_path: String,
-    sessions_root_exists: bool,
-    db_exists: bool,
-    thread_count: usize,
-    message_count: usize,
-    event_count: usize,
-    indexed_files: usize,
-}
-
-#[derive(Debug, Clone)]
-struct ThreadFingerprint {
-    thread_id: String,
-    modified_unix: i64,
-    file_size: i64,
-    parser_version: i64,
-}
-
-#[derive(Debug)]
-struct ParsedSession {
-    thread: ThreadSummary,
-    messages: Vec<ThreadMessage>,
-    events: Vec<EventItem>,
-}
-
-fn run(cli: Cli) -> Result<RenderedOutput> {
-    let db_path = cli.db.unwrap_or_else(default_db_path);
-    let sessions_root = cli.sessions.unwrap_or_else(default_sessions_root);
-
-    let mut conn = open_database(&db_path)?;
-
-    match cli.command {
-        Command::Sync => render_sync(sync_index(&mut conn, &sessions_root, &db_path)?),
-        Command::Doctor => render_doctor(run_doctor(&conn, &sessions_root, &db_path)?),
-        Command::Insights(args) => render_global_insights(generate_global_insights(&conn, &args)?),
-        Command::Messages { command } => match command {
-            MessagesCommand::Search(args) => {
-                render_messages_search(search_messages(&conn, &args.query, args.limit)?)
-            }
-        },
-        Command::Threads { command } => match command {
-            ThreadsCommand::Resolve(args) => {
-                render_threads_resolve(resolve_threads(&conn, &args.query, args.limit)?)
-            }
-            ThreadsCommand::Recent(args) => render_threads_recent(recent_threads(&conn, &args)?),
-            ThreadsCommand::Read(args) => render_thread_read(read_thread(
-                &conn,
-                &args.session_id,
-                args.limit,
-                !args.raw,
-                args.max_message_chars,
-            )?),
-            ThreadsCommand::Summarize(args) => render_thread_summary(summarize_thread(
-                &conn,
-                &args.session_id,
-                args.event_limit,
-                args.max_message_chars,
-            )?),
-            ThreadsCommand::Insight(args) => render_thread_insight(thread_insight(
-                &conn,
-                &args.session_id,
-                args.event_limit,
-                args.max_message_chars,
-            )?),
-        },
-        Command::Events { command } => match command {
-            EventsCommand::Read(args) => {
-                render_events_read(read_events(&conn, &args.session_id, args.limit)?)
-            }
-            EventsCommand::Summary(args) => {
-                render_events_summary(summarize_events(&conn, &args.session_id, args.limit)?)
-            }
-        },
-    }
-}
-
-fn render_sync(report: SyncReport) -> Result<RenderedOutput> {
-    let text = format!(
-        "Scanned: {}\nIndexed: {}\nUpdated: {}\nUnchanged: {}\nRemoved: {}\nDB: {}\nSessions: {}",
-        report.scanned,
-        report.indexed,
-        report.updated,
-        report.unchanged,
-        report.removed,
-        report.db_path,
-        report.sessions_root,
-    );
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({ "ok": true, "command": "sync", "data": report }),
-    })
-}
-
-fn render_doctor(report: DoctorReport) -> Result<RenderedOutput> {
-    let text = format!(
-        "Sessions root: {} ({})\nDB: {} ({})\nThreads: {}\nMessages: {}\nEvents: {}\nIndexed files: {}",
-        report.sessions_root,
-        if report.sessions_root_exists {
-            "present"
-        } else {
-            "missing"
-        },
-        report.db_path,
-        if report.db_exists {
-            "present"
-        } else {
-            "missing"
-        },
-        report.thread_count,
-        report.message_count,
-        report.event_count,
-        report.indexed_files,
-    );
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({ "ok": true, "command": "doctor", "data": report }),
-    })
-}
-
-fn render_messages_search(results: Vec<SearchMessageResult>) -> Result<RenderedOutput> {
-    let mut text = String::new();
-    for (index, item) in results.iter().enumerate() {
-        if index > 0 {
-            text.push('\n');
-            text.push('\n');
-        }
-        writeln!(
-            &mut text,
-            "{}. [{}] {}",
-            index + 1,
-            item.role,
-            item.thread_id
-        )?;
-        if let Some(timestamp) = &item.timestamp {
-            writeln!(&mut text, "   at: {}", timestamp)?;
-        }
-        if let Some(cwd) = &item.cwd {
-            writeln!(&mut text, "   cwd: {}", cwd)?;
-        }
-        if let Some(summary) = &item.summary {
-            writeln!(&mut text, "   thread: {}", one_line(summary, 180))?;
-        }
-        writeln!(&mut text, "   match: {}", item.snippet)?;
-    }
-
-    if results.is_empty() {
-        text.push_str("No matching messages found.");
-    }
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({ "ok": true, "command": "messages.search", "data": results }),
-    })
-}
-
-fn render_threads_resolve(results: Vec<ThreadResolveResult>) -> Result<RenderedOutput> {
-    let mut text = String::new();
-    for (index, item) in results.iter().enumerate() {
-        if index > 0 {
-            text.push('\n');
-            text.push('\n');
-        }
-        writeln!(&mut text, "{}. {}", index + 1, item.thread_id)?;
-        if let Some(started_at) = &item.started_at {
-            writeln!(&mut text, "   started: {}", started_at)?;
-        }
-        if let Some(cwd) = &item.cwd {
-            writeln!(&mut text, "   cwd: {}", cwd)?;
-        }
-        writeln!(&mut text, "   matches: {}", item.match_count)?;
-        writeln!(&mut text, "   why: {}", item.sort_reason)?;
-        if let Some(summary) = &item.summary {
-            writeln!(&mut text, "   {}", one_line(summary, 240))?;
-        }
-    }
-
-    if results.is_empty() {
-        text.push_str("No matching threads found.");
-    }
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({ "ok": true, "command": "threads.resolve", "data": results }),
-    })
-}
-
-fn render_threads_recent(results: Vec<RecentThreadResult>) -> Result<RenderedOutput> {
-    let mut text = String::new();
-    for (index, item) in results.iter().enumerate() {
-        if index > 0 {
-            text.push('\n');
-            text.push('\n');
-        }
-        writeln!(&mut text, "{}. {}", index + 1, item.thread_id)?;
-        if let Some(started_at) = &item.started_at {
-            writeln!(&mut text, "   started: {}", started_at)?;
-        }
-        if let Some(cwd) = &item.cwd {
-            writeln!(&mut text, "   cwd: {}", cwd)?;
-        }
-        if let Some(summary) = &item.summary {
-            writeln!(&mut text, "   {}", one_line(summary, 240))?;
-        }
-    }
-
-    if results.is_empty() {
-        text.push_str("No recent threads found.");
-    }
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({ "ok": true, "command": "threads.recent", "data": results }),
-    })
-}
-
-fn render_thread_read(payload: (ThreadSummary, Vec<ThreadMessage>)) -> Result<RenderedOutput> {
-    let (thread, messages) = payload;
-    let mut text = String::new();
-    writeln!(&mut text, "Thread: {}", thread.thread_id)?;
-    if let Some(started_at) = &thread.started_at {
-        writeln!(&mut text, "Started: {}", started_at)?;
-    }
-    if let Some(cwd) = &thread.cwd {
-        writeln!(&mut text, "CWD: {}", cwd)?;
-    }
-    if let Some(summary) = &thread.summary {
-        writeln!(&mut text, "Summary: {}", one_line(summary, 200))?;
-    }
-    writeln!(&mut text, "Messages: {}", messages.len())?;
-
-    for message in &messages {
-        text.push('\n');
-        writeln!(
-            &mut text,
-            "[{}] {}{}",
-            message.timestamp.as_deref().unwrap_or("unknown-time"),
-            message.role,
-            message
-                .phase
-                .as_ref()
-                .map(|phase| format!(" ({phase})"))
-                .unwrap_or_default()
-        )?;
-        if message.cleaned {
-            writeln!(
-                &mut text,
-                "[cleaned{}]",
-                message
-                    .original_chars
-                    .map(|count| format!(" from {count} chars"))
-                    .unwrap_or_default()
-            )?;
-        }
-        writeln!(&mut text, "{}", message.text)?;
-    }
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({
-            "ok": true,
-            "command": "threads.read",
-            "data": {
-                "thread": thread,
-                "messages": messages,
-            }
-        }),
-    })
-}
-
-fn render_thread_summary(digest: ThreadDigest) -> Result<RenderedOutput> {
-    let mut text = String::new();
-    writeln!(&mut text, "Thread: {}", digest.thread.thread_id)?;
-    if let Some(started_at) = &digest.thread.started_at {
-        writeln!(&mut text, "Started: {}", started_at)?;
-    }
-    if let Some(cwd) = &digest.thread.cwd {
-        writeln!(&mut text, "CWD: {}", cwd)?;
-    }
-    if let Some(objective) = &digest.objective {
-        writeln!(&mut text, "Objective: {}", objective)?;
-    }
-    if !digest.key_requests.is_empty() {
-        writeln!(&mut text, "Requests:")?;
-        for request in &digest.key_requests {
-            writeln!(&mut text, "- {}", request)?;
-        }
-    }
-    if !digest.key_actions.is_empty() {
-        writeln!(&mut text, "Actions:")?;
-        for action in &digest.key_actions {
-            writeln!(&mut text, "- [{}] {}", action.category, action.detail)?;
-        }
-    }
-    if let Some(outcome) = &digest.outcome {
-        writeln!(&mut text, "Outcome: {}", outcome)?;
-    }
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({
-            "ok": true,
-            "command": "threads.summarize",
-            "data": digest,
-        }),
-    })
-}
-
-fn render_thread_insight(insight: ThreadInsight) -> Result<RenderedOutput> {
-    Ok(RenderedOutput {
-        text: insight.content.clone(),
-        json: json!({
-            "ok": true,
-            "command": "threads.insight",
-            "data": insight,
-        }),
-    })
-}
-
-fn render_global_insights(report: InsightsReport) -> Result<RenderedOutput> {
-    Ok(RenderedOutput {
-        text: report.content.clone(),
-        json: json!({
-            "ok": true,
-            "command": "insights",
-            "data": report,
-        }),
-    })
-}
-
-fn render_events_read(payload: (ThreadSummary, Vec<EventItem>)) -> Result<RenderedOutput> {
-    let (thread, events) = payload;
-    let mut text = String::new();
-    writeln!(&mut text, "Thread: {}", thread.thread_id)?;
-    writeln!(&mut text, "Events: {}", events.len())?;
-
-    for event in &events {
-        text.push('\n');
-        writeln!(
-            &mut text,
-            "[{}] {}{}",
-            event.timestamp.as_deref().unwrap_or("unknown-time"),
-            event.kind,
-            event
-                .event_type
-                .as_ref()
-                .map(|kind| format!(" ({kind})"))
-                .unwrap_or_default()
-        )?;
-        if let Some(summary) = &event.summary {
-            writeln!(&mut text, "{}", summary)?;
-        }
-    }
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({
-            "ok": true,
-            "command": "events.read",
-            "data": {
-                "thread": thread,
-                "events": events,
-            }
-        }),
-    })
-}
-
-fn render_events_summary(payload: (ThreadSummary, Vec<EventSummaryItem>)) -> Result<RenderedOutput> {
-    let (thread, events) = payload;
-    let mut text = String::new();
-    writeln!(&mut text, "Thread: {}", thread.thread_id)?;
-    writeln!(&mut text, "Summary Events: {}", events.len())?;
-
-    for event in &events {
-        text.push('\n');
-        writeln!(
-            &mut text,
-            "[{}] {}",
-            event.timestamp.as_deref().unwrap_or("unknown-time"),
-            event.category
-        )?;
-        writeln!(&mut text, "{}", event.detail)?;
-    }
-
-    Ok(RenderedOutput {
-        text,
-        json: json!({
-            "ok": true,
-            "command": "events.summary",
-            "data": {
-                "thread": thread,
-                "events": events,
-            }
-        }),
-    })
-}
-
-fn default_db_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex")
-        .join("codex-threads")
-        .join("index.sqlite3")
-}
-
-fn default_sessions_root() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex").join("sessions")
-}
-
-fn open_database(db_path: &Path) -> Result<Connection> {
-    if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create db directory {}", parent.display()))?;
-    }
-
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed to open database {}", db_path.display()))?;
-    conn.execute_batch(
-        r#"
-        PRAGMA foreign_keys = ON;
-        CREATE TABLE IF NOT EXISTS threads (
-            thread_id TEXT PRIMARY KEY,
-            path TEXT NOT NULL UNIQUE,
-            modified_unix INTEGER NOT NULL,
-            file_size INTEGER NOT NULL,
-            parser_version INTEGER NOT NULL DEFAULT 0,
-            started_at TEXT,
-            cwd TEXT,
-            project_name TEXT,
-            summary TEXT,
-            originator TEXT,
-            cli_version TEXT,
-            model_provider TEXT,
-            agent_nickname TEXT,
-            agent_role TEXT,
-            message_count INTEGER NOT NULL DEFAULT 0,
-            event_count INTEGER NOT NULL DEFAULT 0,
-            indexed_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_threads_started_at ON threads(started_at);
-        CREATE INDEX IF NOT EXISTS idx_threads_cwd ON threads(cwd);
-
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id TEXT NOT NULL,
-            seq INTEGER NOT NULL,
-            timestamp TEXT,
-            role TEXT NOT NULL,
-            phase TEXT,
-            text TEXT NOT NULL,
-            text_lower TEXT NOT NULL,
-            FOREIGN KEY(thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_messages_thread_seq ON messages(thread_id, seq);
-        CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id TEXT NOT NULL,
-            seq INTEGER NOT NULL,
-            timestamp TEXT,
-            kind TEXT NOT NULL,
-            event_type TEXT,
-            summary TEXT,
-            payload_json TEXT NOT NULL,
-            FOREIGN KEY(thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_events_thread_seq ON events(thread_id, seq);
-        CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-        "#,
-    )?;
-    ensure_column_exists(
-        &conn,
-        "threads",
-        "parser_version",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-
-    Ok(conn)
-}
-
-fn sync_index(conn: &mut Connection, sessions_root: &Path, db_path: &Path) -> Result<SyncReport> {
-    if !sessions_root.exists() {
-        bail!("sessions root does not exist: {}", sessions_root.display());
-    }
-
-    let indexed = load_fingerprints(conn)?;
-    let files = session_files(sessions_root)?;
-    let mut seen_paths = HashSet::new();
-    let mut report = SyncReport {
-        sessions_root: sessions_root.display().to_string(),
-        db_path: db_path.display().to_string(),
-        scanned: 0,
-        indexed: 0,
-        updated: 0,
-        unchanged: 0,
-        removed: 0,
-    };
-
-    let tx = conn.transaction()?;
-
-    for file in &files {
-        report.scanned += 1;
-        let fingerprint = file_fingerprint(file)?;
-        let path_key = file.display().to_string();
-        seen_paths.insert(path_key.clone());
-
-        if let Some(current) = indexed.get(&path_key) {
-            if current.modified_unix == fingerprint.modified_unix
-                && current.file_size == fingerprint.file_size
-                && current.parser_version == fingerprint.parser_version
-            {
-                report.unchanged += 1;
-                continue;
-            }
-        }
-
-        let parsed = parse_session_file(file)?;
-        replace_thread(&tx, file, &fingerprint, &parsed)?;
-
-        if indexed.contains_key(&path_key) {
-            report.updated += 1;
-        } else {
-            report.indexed += 1;
-        }
-    }
-
-    for (path, fingerprint) in &indexed {
-        if !seen_paths.contains(path) {
-            tx.execute(
-                "DELETE FROM threads WHERE thread_id = ?1",
-                params![fingerprint.thread_id],
-            )?;
-            report.removed += 1;
-        }
-    }
-
-    tx.commit()?;
-    Ok(report)
-}
-
-fn run_doctor(conn: &Connection, sessions_root: &Path, db_path: &Path) -> Result<DoctorReport> {
-    let thread_count: usize = conn
-        .query_row("SELECT COUNT(*) FROM threads", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as usize;
-    let message_count: usize = conn
-        .query_row("SELECT COUNT(*) FROM messages", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as usize;
-    let event_count: usize = conn
-        .query_row("SELECT COUNT(*) FROM events", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as usize;
-
-    Ok(DoctorReport {
-        sessions_root: sessions_root.display().to_string(),
-        db_path: db_path.display().to_string(),
-        sessions_root_exists: sessions_root.exists(),
-        db_exists: db_path.exists(),
-        thread_count,
-        message_count,
-        event_count,
-        indexed_files: thread_count,
-    })
-}
-
-fn search_messages(
-    conn: &Connection,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<SearchMessageResult>> {
-    let normalized = normalize_query(query);
-    let snippet_query = compact_whitespace(query).to_lowercase();
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT
-            m.thread_id,
-            m.timestamp,
-            m.role,
-            m.phase,
-            m.text,
-            t.summary,
-            t.cwd,
-            t.path
-        FROM messages m
-        JOIN threads t ON t.thread_id = m.thread_id
-        WHERE instr(m.text_lower, ?1) > 0
-        ORDER BY COALESCE(m.timestamp, t.started_at) DESC
-        LIMIT ?2
-        "#,
-    )?;
-
-    let rows = stmt.query_map(params![normalized, limit as i64], |row| {
-        let text: String = row.get(4)?;
-        let cleaned_text = clean_search_text(&text, 600);
-        let snippet_source = if cleaned_text.to_lowercase().contains(&snippet_query) {
-            cleaned_text.as_str()
-        } else {
-            text.as_str()
-        };
-        Ok(SearchMessageResult {
-            thread_id: row.get(0)?,
-            timestamp: row.get(1)?,
-            role: row.get(2)?,
-            phase: row.get(3)?,
-            summary: row.get(5)?,
-            snippet: build_search_snippet(snippet_source, &snippet_query, 180),
-            cwd: row.get(6)?,
-            path: row.get(7)?,
-        })
-    })?;
-
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
-}
-
-fn resolve_threads(
-    conn: &Connection,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<ThreadResolveResult>> {
-    let normalized = normalize_query(query);
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT
-            t.thread_id,
-            t.started_at,
-            t.cwd,
-            t.project_name,
-            t.summary,
-            t.path,
-            t.message_count,
-            t.event_count,
-            SUM(CASE WHEN instr(m.text_lower, ?1) > 0 THEN 1 ELSE 0 END) AS match_count,
-            MAX(CASE WHEN instr(m.text_lower, ?1) > 0 THEN m.timestamp ELSE NULL END) AS last_match_at,
-            CASE WHEN lower(COALESCE(t.project_name, '')) = ?1 THEN 1 ELSE 0 END AS project_exact,
-            CASE WHEN instr(lower(COALESCE(t.project_name, '')), ?1) > 0 THEN 1 ELSE 0 END AS project_contains,
-            CASE WHEN instr(lower(COALESCE(t.cwd, '')), ?1) > 0 THEN 1 ELSE 0 END AS cwd_contains,
-            CASE WHEN instr(lower(COALESCE(t.path, '')), ?1) > 0 THEN 1 ELSE 0 END AS path_contains,
-            CASE WHEN instr(lower(COALESCE(t.summary, '')), ?1) > 0 THEN 1 ELSE 0 END AS summary_contains,
-            CASE WHEN instr(lower(t.thread_id), ?1) > 0 THEN 1 ELSE 0 END AS thread_id_contains
-        FROM threads t
-        LEFT JOIN messages m ON m.thread_id = t.thread_id
-        GROUP BY t.thread_id
-        HAVING project_exact = 1
-            OR project_contains = 1
-            OR cwd_contains = 1
-            OR path_contains = 1
-            OR summary_contains = 1
-            OR thread_id_contains = 1
-            OR match_count > 0
-        "#,
-    )?;
-
-    let rows = stmt.query_map(params![normalized], |row| {
-        Ok(ThreadResolveCandidate {
-            thread_id: row.get(0)?,
-            started_at: row.get(1)?,
-            cwd: row.get(2)?,
-            project_name: row.get(3)?,
-            summary: row.get(4)?,
-            path: row.get(5)?,
-            message_count: row.get::<_, i64>(6)? as usize,
-            event_count: row.get::<_, i64>(7)? as usize,
-            match_count: row.get::<_, i64>(8)? as usize,
-            last_match_at: row.get(9)?,
-            project_exact: row.get::<_, i64>(10)? != 0,
-            project_contains: row.get::<_, i64>(11)? != 0,
-            cwd_contains: row.get::<_, i64>(12)? != 0,
-            path_contains: row.get::<_, i64>(13)? != 0,
-            summary_contains: row.get::<_, i64>(14)? != 0,
-            thread_id_contains: row.get::<_, i64>(15)? != 0,
-        })
-    })?;
-
-    let mut candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    candidates.sort_by(|left, right| compare_resolve_candidates(left, right));
-
-    Ok(candidates
-        .into_iter()
-        .take(limit)
-        .map(|item| {
-            let sort_reason = resolve_sort_reason(&item);
-            ThreadResolveResult {
-                thread_id: item.thread_id,
-                started_at: item.started_at,
-                cwd: item.cwd,
-                project_name: item.project_name,
-                summary: item.summary,
-                path: item.path,
-                message_count: item.message_count,
-                event_count: item.event_count,
-                match_count: item.match_count,
-                last_match_at: item.last_match_at,
-                sort_reason,
-            }
-        })
-        .collect())
-}
-
-fn read_thread(
-    conn: &Connection,
-    session_id: &str,
-    limit: Option<usize>,
-    clean: bool,
-    max_message_chars: usize,
-) -> Result<(ThreadSummary, Vec<ThreadMessage>)> {
-    let thread = find_thread(conn, session_id)?;
-    let sql = if limit.is_some() {
-        r#"
-        SELECT timestamp, role, phase, text
-        FROM messages
-        WHERE thread_id = ?1
-        ORDER BY seq ASC
-        LIMIT ?2
-        "#
-    } else {
-        r#"
-        SELECT timestamp, role, phase, text
-        FROM messages
-        WHERE thread_id = ?1
-        ORDER BY seq ASC
-        "#
-    };
-
-    let mut stmt = conn.prepare(sql)?;
-    let messages = if let Some(limit) = limit {
-        let rows = stmt.query_map(params![thread.thread_id, limit as i64], |row| {
-            Ok(ThreadMessage {
-                timestamp: row.get(0)?,
-                role: row.get(1)?,
-                phase: row.get(2)?,
-                text: row.get(3)?,
-                cleaned: false,
-                original_chars: None,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    } else {
-        let rows = stmt.query_map(params![thread.thread_id], |row| {
-            Ok(ThreadMessage {
-                timestamp: row.get(0)?,
-                role: row.get(1)?,
-                phase: row.get(2)?,
-                text: row.get(3)?,
-                cleaned: false,
-                original_chars: None,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-
-    let messages = if clean {
-        messages
-            .into_iter()
-            .map(|message| clean_thread_message(message, max_message_chars))
-            .collect()
-    } else {
-        messages
-    };
-
-    Ok((thread, messages))
-}
-
-fn recent_threads(conn: &Connection, args: &RecentThreadsArgs) -> Result<Vec<RecentThreadResult>> {
-    let cwd_filter = args.cwd.as_ref().map(|value| normalize_query(value));
-    let project_filter = args.project.as_ref().map(|value| normalize_query(value));
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT thread_id, started_at, cwd, project_name, summary, path, message_count, event_count
-        FROM threads
-        WHERE (?1 IS NULL OR instr(lower(COALESCE(cwd, '')), ?1) > 0)
-          AND (?2 IS NULL OR lower(COALESCE(project_name, '')) = ?2)
-        ORDER BY started_at DESC
-        LIMIT ?3
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        params![cwd_filter, project_filter, args.limit as i64],
-        |row| {
-            Ok(RecentThreadResult {
-                thread_id: row.get(0)?,
-                started_at: row.get(1)?,
-                cwd: row.get(2)?,
-                project_name: row.get(3)?,
-                summary: row.get(4)?,
-                path: row.get(5)?,
-                message_count: row.get::<_, i64>(6)? as usize,
-                event_count: row.get::<_, i64>(7)? as usize,
-            })
-        },
-    )?;
-
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
-}
-
-fn read_events(
-    conn: &Connection,
-    session_id: &str,
-    limit: usize,
-) -> Result<(ThreadSummary, Vec<EventItem>)> {
-    let thread = find_thread(conn, session_id)?;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT timestamp, kind, event_type, summary, payload_json
-        FROM events
-        WHERE thread_id = ?1
-        ORDER BY seq DESC
-        LIMIT ?2
-        "#,
-    )?;
-
-    let rows = stmt.query_map(params![thread.thread_id, limit as i64], |row| {
-        let payload_json: String = row.get(4)?;
-        let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
-        Ok(EventItem {
-            timestamp: row.get(0)?,
-            kind: row.get(1)?,
-            event_type: row.get(2)?,
-            summary: row.get(3)?,
-            payload,
-        })
-    })?;
-
-    let mut events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    events.reverse();
-    Ok((thread, events))
-}
-
-fn summarize_events(
-    conn: &Connection,
-    session_id: &str,
-    limit: usize,
-) -> Result<(ThreadSummary, Vec<EventSummaryItem>)> {
-    let (thread, events) = read_events(conn, session_id, limit)?;
-    Ok((thread, summarize_event_stream(&events)))
-}
-
-fn summarize_thread(
-    conn: &Connection,
-    session_id: &str,
-    event_limit: usize,
-    max_message_chars: usize,
-) -> Result<ThreadDigest> {
-    let (thread, messages) = read_thread(conn, session_id, None, true, max_message_chars)?;
-    let (_, events) = summarize_events(conn, session_id, event_limit)?;
-    Ok(build_thread_digest(thread, messages, events))
-}
-
-fn thread_insight(
-    conn: &Connection,
-    session_id: &str,
-    event_limit: usize,
-    max_message_chars: usize,
-) -> Result<ThreadInsight> {
-    let digest = summarize_thread(conn, session_id, event_limit, max_message_chars)?;
-    Ok(build_thread_insight(digest))
-}
-
-fn build_thread_digest(
-    thread: ThreadSummary,
-    messages: Vec<ThreadMessage>,
-    events: Vec<EventSummaryItem>,
-) -> ThreadDigest {
-    let objective = messages
-        .iter()
-        .find(|message| message.role == "user" && is_substantive_message(&message.text))
-        .map(|message| one_line(&message.text, 220))
-        .or_else(|| thread.summary.as_ref().map(|summary| one_line(summary, 220)));
-
-    let objective_normalized = objective
-        .as_ref()
-        .map(|text| normalize_summary_value(text))
-        .unwrap_or_default();
-
-    let mut key_requests = Vec::new();
-    for message in messages.iter().filter(|message| message.role == "user") {
-        let line = one_line(&message.text, 220);
-        if !is_substantive_message(&line) {
-            continue;
-        }
-        if normalize_summary_value(&line) == objective_normalized {
-            continue;
-        }
-        push_unique(&mut key_requests, line, 4);
-    }
-
-    let outcome = messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message.role == "assistant"
-                && message.phase.as_deref() == Some("final_answer")
-                && is_substantive_message(&message.text)
-        })
-        .or_else(|| {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.role == "assistant" && is_substantive_message(&message.text))
-        })
-        .map(|message| one_line(&message.text, 280));
-
-    let key_actions = events
-        .into_iter()
-        .filter(|event| event.category != "suppressed" && event.category != "message")
-        .rev()
-        .take(6)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    ThreadDigest {
-        thread,
-        objective,
-        key_requests,
-        key_actions,
-        outcome,
-    }
-}
-
-fn build_thread_insight(digest: ThreadDigest) -> ThreadInsight {
-    let title = build_insight_title(&digest);
-    let summary = build_insight_summary(&digest);
-    let insights = derive_insight_points(&digest);
-    let evidence = build_insight_evidence(&digest);
-    let next_steps = derive_next_steps(&digest, &insights);
-    let content = render_insight_content(&title, &summary, &insights, &evidence, &next_steps);
-
-    ThreadInsight {
-        thread: digest.thread,
-        title,
-        summary,
-        insights,
-        evidence,
-        next_steps,
-        content,
-    }
-}
-
-fn generate_global_insights(conn: &Connection, args: &InsightsArgs) -> Result<InsightsReport> {
-    let candidate_threads = candidate_threads_for_insights(conn, args)?;
-    let sessions_scanned = candidate_threads.len();
-    let mut facts = Vec::new();
-
-    for thread in candidate_threads {
-        if let Some(fact) = build_session_fact(conn, thread, args.event_limit, args.max_message_chars)?
-        {
-            facts.push(fact);
-        }
-    }
-
-    facts = select_insight_facts(facts, args);
-
-    if facts.is_empty() {
-        bail!("no analyzable sessions found for insights");
-    }
-
-    let report_path = args
-        .output
-        .clone()
-        .unwrap_or_else(default_insights_report_path);
-    let report = build_global_insights_report(&facts, sessions_scanned, args.project.clone(), &report_path);
-    write_insights_report_html(&report_path, &report)?;
-    Ok(report)
-}
-
-fn candidate_threads_for_insights(
-    conn: &Connection,
-    args: &InsightsArgs,
-) -> Result<Vec<ThreadSummary>> {
-    let project_filter = args.project.as_ref().map(|value| normalize_query(value));
-    let fetch_limit = if args.project.is_some() {
-        args.limit
-    } else {
-        args.limit.saturating_mul(4).clamp(args.limit, 200)
-    };
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT thread_id, path, started_at, cwd, project_name, summary, originator, cli_version, model_provider, agent_nickname, agent_role, message_count, event_count
-        FROM threads
-        WHERE (?1 IS NULL OR lower(COALESCE(project_name, '')) = ?1)
-        ORDER BY started_at DESC
-        LIMIT ?2
-        "#,
-    )?;
-
-    let rows = stmt.query_map(params![project_filter, fetch_limit as i64], |row| {
-        Ok(ThreadSummary {
-            thread_id: row.get(0)?,
-            path: row.get(1)?,
-            started_at: row.get(2)?,
-            cwd: row.get(3)?,
-            project_name: row.get(4)?,
-            summary: row.get(5)?,
-            originator: row.get(6)?,
-            cli_version: row.get(7)?,
-            model_provider: row.get(8)?,
-            agent_nickname: row.get(9)?,
-            agent_role: row.get(10)?,
-            message_count: row.get::<_, i64>(11)? as usize,
-            event_count: row.get::<_, i64>(12)? as usize,
-        })
-    })?;
-
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
-}
-
-fn build_session_fact(
-    conn: &Connection,
-    thread: ThreadSummary,
-    event_limit: usize,
-    max_message_chars: usize,
-) -> Result<Option<SessionFact>> {
-    let (_, messages) = read_thread(conn, &thread.thread_id, None, true, max_message_chars)?;
-    let (_, events) = summarize_events(conn, &thread.thread_id, event_limit)?;
-
-    let substantive_user_messages = messages
-        .iter()
-        .filter(|message| message.role == "user" && is_substantive_message(&message.text))
-        .count();
-    let cleaned_context_messages = messages.iter().filter(|message| message.cleaned).count();
-    let command_successes = events
-        .iter()
-        .filter(|event| event.category == "command")
-        .count();
-    let command_failures = events.iter().filter(|event| event.category == "error").count();
-
-    if substantive_user_messages == 0 {
-        return Ok(None);
-    }
-    if thread.message_count < 3 && command_successes == 0 && command_failures == 0 {
-        return Ok(None);
-    }
-
-    let digest = build_thread_digest(thread.clone(), messages, events);
-    Ok(Some(SessionFact {
-        thread,
-        objective: digest.objective,
-        outcome: digest.outcome,
-        key_requests: digest.key_requests,
-        key_actions: digest.key_actions,
-        substantive_user_messages,
-        cleaned_context_messages,
-        command_successes,
-        command_failures,
-    }))
-}
-
-fn select_insight_facts(mut facts: Vec<SessionFact>, args: &InsightsArgs) -> Vec<SessionFact> {
-    if facts.len() <= args.limit {
-        return facts;
-    }
-
-    if args.project.is_some() {
-        facts.truncate(args.limit);
-        return facts;
-    }
-
-    let mut buckets: HashMap<String, VecDeque<SessionFact>> = HashMap::new();
-    let mut order = Vec::new();
-    for fact in facts {
-        let project = session_project_name(&fact);
-        if !buckets.contains_key(&project) {
-            order.push(project.clone());
-        }
-        buckets.entry(project).or_default().push_back(fact);
-    }
-
-    let mut selected = Vec::new();
-    while selected.len() < args.limit {
-        let mut made_progress = false;
-        for project in &order {
-            if selected.len() >= args.limit {
-                break;
-            }
-            if let Some(fact) = buckets.get_mut(project).and_then(VecDeque::pop_front) {
-                selected.push(fact);
-                made_progress = true;
-            }
-        }
-
-        if !made_progress {
-            break;
-        }
-    }
-
-    selected
-}
-
-fn build_global_insights_report(
-    facts: &[SessionFact],
-    sessions_scanned: usize,
-    project_filter: Option<String>,
-    report_path: &Path,
-) -> InsightsReport {
-    let work_areas = build_work_areas(facts);
-    let interaction_style = build_interaction_style(facts, &work_areas);
-    let what_works = build_what_works(facts, &work_areas);
-    let friction = build_friction_cards(facts);
-    let suggestions = build_suggestion_cards(facts, &work_areas, &friction);
-    let on_the_horizon = build_horizon_items(facts, &work_areas);
-    let evidence = build_global_evidence(facts);
-    let at_a_glance =
-        build_at_a_glance(facts, &work_areas, &interaction_style, &friction, &suggestions);
-    let metadata = InsightsMetadata {
-        sessions_scanned,
-        sessions_analyzed: facts.len(),
-        project_filter,
-        generated_report_path: report_path.display().to_string(),
-    };
-    let content = render_global_insights_content(
-        &metadata,
-        &at_a_glance,
-        &work_areas,
-        &interaction_style,
-        &what_works,
-        &friction,
-        &suggestions,
-        &on_the_horizon,
-        &evidence,
-    );
-
-    InsightsReport {
-        metadata,
-        at_a_glance,
-        work_areas,
-        interaction_style,
-        what_works,
-        friction,
-        suggestions,
-        on_the_horizon,
-        evidence,
-        content,
-    }
-}
-
-fn build_work_areas(facts: &[SessionFact]) -> Vec<WorkArea> {
-    let mut grouped: HashMap<String, Vec<&SessionFact>> = HashMap::new();
-    for fact in facts {
-        grouped
-            .entry(session_project_name(fact))
-            .or_default()
-            .push(fact);
-    }
-
-    let mut areas = grouped
-        .into_iter()
-        .map(|(name, group)| {
-            let mut examples = Vec::new();
-            for fact in &group {
-                if let Some(objective) = &fact.objective {
-                    push_unique(&mut examples, one_line(objective, 120), 2);
-                } else if let Some(summary) = &fact.thread.summary {
-                    push_unique(&mut examples, one_line(summary, 120), 2);
-                }
-            }
-            let description = if examples.is_empty() {
-                format!("{} recent sessions in this area.", group.len())
-            } else {
-                format!(
-                    "{} recent sessions focused on {}.",
-                    group.len(),
-                    examples.join(" / ")
-                )
-            };
-            WorkArea {
-                name,
-                session_count: group.len(),
-                description,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    areas.sort_by(|left, right| {
-        right
-            .session_count
-            .cmp(&left.session_count)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    areas.truncate(5);
-    areas
-}
-
-fn build_interaction_style(facts: &[SessionFact], work_areas: &[WorkArea]) -> InteractionStyle {
-    let total = facts.len().max(1);
-    let iterative_sessions = facts
-        .iter()
-        .filter(|fact| fact.substantive_user_messages >= 2)
-        .count();
-    let command_heavy_sessions = facts
-        .iter()
-        .filter(|fact| fact.command_successes + fact.command_failures >= 2)
-        .count();
-    let context_heavy_sessions = facts
-        .iter()
-        .filter(|fact| fact.cleaned_context_messages > 0)
-        .count();
-    let dominant_area = work_areas.first().map(|area| area.session_count).unwrap_or(0);
-    let dominant_share = dominant_area as f64 / total as f64;
-
-    let mut sentences = Vec::new();
-    let key_pattern = if iterative_sessions * 2 >= total {
-        "You tend to refine work inside the same thread instead of restarting from scratch."
-            .to_owned()
-    } else if dominant_share >= 0.6 {
-        "You usually stay anchored on one project until the thread produces a concrete result."
-            .to_owned()
-    } else {
-        "You use Codex across multiple threads and projects, then come back to tighten the ones that matter."
-            .to_owned()
-    };
-    sentences.push(key_pattern.clone());
-
-    if command_heavy_sessions * 2 >= total {
-        sentences.push(
-            "Your sessions are operational, not just conversational: builds, installs, searches, and checks are part of how you validate progress."
-                .to_owned(),
-        );
-    }
-    if context_heavy_sessions * 3 >= total {
-        sentences.push(
-            "You frequently inject dense reference context, which makes cleanup, collapsing, and summary layers important to keep the thread reusable."
-                .to_owned(),
-        );
-    }
-    if dominant_share >= 0.6 {
-        let area_name = work_areas
-            .first()
-            .map(|area| area.name.as_str())
-            .unwrap_or("one project");
-        sentences.push(format!(
-            "Recent usage is concentrated around {area_name}, suggesting you prefer going deep on one active system before switching context."
-        ));
-    } else if work_areas.len() > 1 {
-        sentences.push(
-            "Recent usage spans multiple work areas, so cross-thread summaries need to separate project-specific patterns from global habits."
-                .to_owned(),
-        );
-    }
-
-    InteractionStyle {
-        narrative: sentences.join(" "),
-        key_pattern,
-    }
-}
-
-fn build_what_works(facts: &[SessionFact], work_areas: &[WorkArea]) -> Vec<InsightCard> {
-    let total = facts.len().max(1);
-    let with_outcomes = facts.iter().filter(|fact| fact.outcome.is_some()).count();
-    let command_sessions = facts
-        .iter()
-        .filter(|fact| fact.command_successes > 0)
-        .count();
-    let iterative_sessions = facts
-        .iter()
-        .filter(|fact| fact.substantive_user_messages >= 2)
-        .count();
-
-    let mut cards = Vec::new();
-    if command_sessions > 0 {
-        cards.push(InsightCard {
-            title: "You validate work with real commands".to_owned(),
-            detail: format!(
-                "{} of {} analyzed sessions included successful command execution, which keeps the conversation tied to observable results instead of speculation.",
-                command_sessions, total
-            ),
-        });
-    }
-    if iterative_sessions > 0 {
-        cards.push(InsightCard {
-            title: "You improve results by iterating in-thread".to_owned(),
-            detail: format!(
-                "{} sessions contained substantive follow-up requests, showing that your best outcomes come from tightening the same thread rather than throwing it away.",
-                iterative_sessions
-            ),
-        });
-    }
-    if with_outcomes > 0 {
-        cards.push(InsightCard {
-            title: "Threads often end in a concrete deliverable".to_owned(),
-            detail: format!(
-                "{} analyzed sessions ended with a detectable assistant outcome, which means your history contains reusable conclusions rather than only partial exploration.",
-                with_outcomes
-            ),
-        });
-    }
-    if cards.is_empty() {
-        cards.push(InsightCard {
-            title: "Your history already contains reusable signals".to_owned(),
-            detail: "Even without explicit success markers everywhere, the session archive still captures repeatable goals, actions, and outcomes that can be turned into guidance.".to_owned(),
-        });
-    }
-    if let Some(area) = work_areas.first() {
-        cards.push(InsightCard {
-            title: "Project concentration creates stronger memory".to_owned(),
-            detail: format!(
-                "The busiest recent area is {}, which makes it easier to detect repeated patterns and extract project-specific workflows.",
-                area.name
-            ),
-        });
-    }
-    cards.truncate(4);
-    cards
-}
-
-fn build_friction_cards(facts: &[SessionFact]) -> Vec<FrictionCard> {
-    let mut cards = Vec::new();
-    let failed_sessions = facts
-        .iter()
-        .filter(|fact| fact.command_failures > 0)
-        .collect::<Vec<_>>();
-    if !failed_sessions.is_empty() {
-        let mut examples = Vec::new();
-        for fact in &failed_sessions {
-            for action in fact.key_actions.iter().filter(|action| action.category == "error") {
-                push_unique(&mut examples, one_line(&action.detail, 160), 3);
-            }
-        }
-        cards.push(FrictionCard {
-            category: "Execution friction".to_owned(),
-            detail: format!(
-                "{} analyzed sessions contained failed commands or tool-level errors, which means environment and validation issues still leak into the workflow.",
-                failed_sessions.len()
-            ),
-            examples,
-        });
-    }
-
-    let context_heavy_sessions = facts
-        .iter()
-        .filter(|fact| fact.cleaned_context_messages > 0)
-        .collect::<Vec<_>>();
-    if !context_heavy_sessions.is_empty() {
-        let mut examples = Vec::new();
-        for fact in context_heavy_sessions.iter().take(3) {
-            if let Some(objective) = &fact.objective {
-                push_unique(&mut examples, one_line(objective, 160), 3);
-            }
-        }
-        cards.push(FrictionCard {
-            category: "Context overload".to_owned(),
-            detail: format!(
-                "{} sessions required collapsing pasted context or oversized payloads, which makes raw transcripts harder to reuse without cleanup layers.",
-                context_heavy_sessions.len()
-            ),
-            examples,
-        });
-    }
-
-    let weak_outcome_sessions = facts
-        .iter()
-        .filter(|fact| fact.outcome.is_none())
-        .count();
-    if weak_outcome_sessions * 2 >= facts.len().max(1) {
-        cards.push(FrictionCard {
-            category: "Soft thread endings".to_owned(),
-            detail: "Many sessions do not end with a crisp final-answer outcome, so retrospective analysis has to infer completion from indirect signals.".to_owned(),
-            examples: Vec::new(),
-        });
-    }
-
-    cards.truncate(3);
-    cards
-}
-
-fn build_suggestion_cards(
-    facts: &[SessionFact],
-    work_areas: &[WorkArea],
-    friction: &[FrictionCard],
-) -> Vec<SuggestionCard> {
-    let mut suggestions = Vec::new();
-    let context_heavy_sessions = facts
-        .iter()
-        .filter(|fact| fact.cleaned_context_messages > 0)
-        .count();
-    if context_heavy_sessions > 0 {
-        suggestions.push(SuggestionCard {
-            title: "Keep context folded by default".to_owned(),
-            detail: "Recent usage shows that long pasted references are common. Preserve compact snippets and collapsed payload markers so global reports stay readable.".to_owned(),
-        });
-    }
-    if work_areas.len() > 1 {
-        let area = work_areas
-            .first()
-            .map(|item| item.name.as_str())
-            .unwrap_or("project");
-        suggestions.push(SuggestionCard {
-            title: "Run insights per project when needed".to_owned(),
-            detail: format!(
-                "Your recent usage spans multiple work areas. Use `codex-threads insights --project {area}` when you want a cleaner project-specific report."
-            ),
-        });
-    }
-    if friction.iter().any(|item| item.category == "Execution friction") {
-        suggestions.push(SuggestionCard {
-            title: "Capture preflight checks for recurring command flows".to_owned(),
-            detail: "Failed commands are one of the clearest friction signals. Turning setup checks into a repeatable preflight reduces wasted retries.".to_owned(),
-        });
-    }
-    suggestions.push(SuggestionCard {
-        title: "Promote repeated good threads into reusable patterns".to_owned(),
-        detail: "When a thread repeatedly follows the same path from request to validation to outcome, preserve that flow as a checklist or automation instead of rediscovering it manually.".to_owned(),
-    });
-    suggestions.truncate(4);
-    suggestions
-}
-
-fn build_horizon_items(facts: &[SessionFact], work_areas: &[WorkArea]) -> Vec<String> {
-    let mut items = Vec::new();
-    if facts.iter().any(|fact| fact.command_successes >= 2) {
-        items.push(
-            "The next step is not just reading old threads but turning recurring execution loops into batch reports, checklists, or automations."
-                .to_owned(),
-        );
-    }
-    if let Some(area) = work_areas.first() {
-        items.push(format!(
-            "Because {} dominates recent work, a future project-specific report can become a durable working memory layer for that codebase.",
-            area.name
-        ));
-    }
-    if items.is_empty() {
-        items.push(
-            "As the archive grows, the most valuable upgrade is moving from single-thread recap to repeated pattern detection across many threads."
-                .to_owned(),
-        );
-    }
-    items
-}
-
-fn build_global_evidence(facts: &[SessionFact]) -> Vec<String> {
-    let mut evidence = Vec::new();
-    for fact in facts.iter().take(6) {
-        if let Some(objective) = &fact.objective {
-            push_unique(
-                &mut evidence,
-                format!("Session objective: {}", one_line(objective, 180)),
-                8,
-            );
-        }
-        if let Some(request) = fact.key_requests.first() {
-            push_unique(
-                &mut evidence,
-                format!("User request: {}", one_line(request, 180)),
-                8,
-            );
-        }
-        if let Some(outcome) = &fact.outcome {
-            push_unique(
-                &mut evidence,
-                format!("Outcome: {}", one_line(outcome, 180)),
-                8,
-            );
-        }
-        for action in fact.key_actions.iter().take(2) {
-            push_unique(
-                &mut evidence,
-                format!("Action: {}", one_line(&action.detail, 180)),
-                8,
-            );
-        }
-    }
-    evidence
-}
-
-fn build_at_a_glance(
-    facts: &[SessionFact],
-    work_areas: &[WorkArea],
-    interaction_style: &InteractionStyle,
-    friction: &[FrictionCard],
-    suggestions: &[SuggestionCard],
-) -> AtAGlance {
-    let total = facts.len().max(1);
-    let with_outcomes = facts.iter().filter(|fact| fact.outcome.is_some()).count();
-    let command_sessions = facts
-        .iter()
-        .filter(|fact| fact.command_successes > 0)
-        .count();
-    let failed_sessions = facts
-        .iter()
-        .filter(|fact| fact.command_failures > 0)
-        .count();
-
-    let dominant_area = work_areas.first().map(|area| area.name.as_str()).unwrap_or("recent work");
-    let hindering = if let Some(card) = friction.first() {
-        card.detail.clone()
-    } else {
-        "The main limitation is that many transcripts still need interpretation before they become reusable guidance.".to_owned()
-    };
-    let quick_win = suggestions
-        .first()
-        .map(|item| item.detail.clone())
-        .unwrap_or_else(|| "Generate project-scoped reports when you want a tighter view of one active codebase.".to_owned());
-
-    AtAGlance {
-        whats_working: format!(
-            "{} {} of {} analyzed sessions ended with a detectable outcome, and {} included successful command execution.",
-            interaction_style.key_pattern, with_outcomes, total, command_sessions
-        ),
-        whats_hindering: if failed_sessions > 0 {
-            format!("{hindering} Failed execution showed up in {failed_sessions} analyzed sessions.")
-        } else {
-            hindering
-        },
-        quick_wins: quick_win,
-        ambitious_workflows: format!(
-            "The strongest future workflow is a reusable report layer around {dominant_area}: repeated threads can become project memory, not just archived transcripts."
-        ),
-    }
-}
-
-fn render_global_insights_content(
-    metadata: &InsightsMetadata,
-    at_a_glance: &AtAGlance,
-    work_areas: &[WorkArea],
-    interaction_style: &InteractionStyle,
-    what_works: &[InsightCard],
-    friction: &[FrictionCard],
-    suggestions: &[SuggestionCard],
-    on_the_horizon: &[String],
-    evidence: &[String],
-) -> String {
-    let mut text = String::new();
-    writeln!(&mut text, "# Codex Insights").expect("write to string");
-    writeln!(
-        &mut text,
-        "\n{} sessions scanned · {} analyzed · report: {}",
-        metadata.sessions_scanned, metadata.sessions_analyzed, metadata.generated_report_path
-    )
-    .expect("write to string");
-
-    writeln!(&mut text, "\n## At a Glance").expect("write to string");
-    writeln!(&mut text, "- **What's working:** {}", at_a_glance.whats_working)
-        .expect("write to string");
-    writeln!(
-        &mut text,
-        "- **What's hindering:** {}",
-        at_a_glance.whats_hindering
-    )
-    .expect("write to string");
-    writeln!(&mut text, "- **Quick wins:** {}", at_a_glance.quick_wins)
-        .expect("write to string");
-    writeln!(
-        &mut text,
-        "- **Ambitious workflows:** {}",
-        at_a_glance.ambitious_workflows
-    )
-    .expect("write to string");
-
-    if !work_areas.is_empty() {
-        writeln!(&mut text, "\n## What You Work On").expect("write to string");
-        for area in work_areas {
-            writeln!(
-                &mut text,
-                "- **{}**: {}",
-                area.name, area.description
-            )
-            .expect("write to string");
-        }
-    }
-
-    writeln!(&mut text, "\n## How You Use Codex").expect("write to string");
-    writeln!(&mut text, "{}", interaction_style.narrative).expect("write to string");
-
-    if !what_works.is_empty() {
-        writeln!(&mut text, "\n## What Works").expect("write to string");
-        for item in what_works {
-            writeln!(&mut text, "- **{}**: {}", item.title, item.detail)
-                .expect("write to string");
-        }
-    }
-
-    if !friction.is_empty() {
-        writeln!(&mut text, "\n## Where Things Go Wrong").expect("write to string");
-        for item in friction {
-            writeln!(&mut text, "- **{}**: {}", item.category, item.detail)
-                .expect("write to string");
-            for example in &item.examples {
-                writeln!(&mut text, "  - {}", example).expect("write to string");
-            }
-        }
-    }
-
-    if !suggestions.is_empty() {
-        writeln!(&mut text, "\n## Suggestions").expect("write to string");
-        for item in suggestions {
-            writeln!(&mut text, "- **{}**: {}", item.title, item.detail)
-                .expect("write to string");
-        }
-    }
-
-    if !on_the_horizon.is_empty() {
-        writeln!(&mut text, "\n## On the Horizon").expect("write to string");
-        for item in on_the_horizon {
-            writeln!(&mut text, "- {}", item).expect("write to string");
-        }
-    }
-
-    if !evidence.is_empty() {
-        writeln!(&mut text, "\n## Evidence").expect("write to string");
-        for item in evidence {
-            writeln!(&mut text, "- {}", item).expect("write to string");
-        }
-    }
-
-    text.trim_end().to_owned()
-}
-
-fn write_insights_report_html(path: &Path, report: &InsightsReport) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create report directory {}", parent.display()))?;
-    }
-    fs::write(path, generate_insights_html(report))
-        .with_context(|| format!("failed to write report {}", path.display()))?;
-    Ok(())
-}
-
-fn generate_insights_html(report: &InsightsReport) -> String {
-    let work_areas = report
-        .work_areas
-        .iter()
-        .map(|area| {
-            format!(
-                "<li><strong>{}</strong>: {}</li>",
-                escape_html(&area.name),
-                escape_html(&area.description)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let what_works = report
-        .what_works
-        .iter()
-        .map(|item| {
-            format!(
-                "<li><strong>{}</strong>: {}</li>",
-                escape_html(&item.title),
-                escape_html(&item.detail)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let friction = report
-        .friction
-        .iter()
-        .map(|item| {
-            let examples = if item.examples.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "<ul>{}</ul>",
-                    item.examples
-                        .iter()
-                        .map(|example| format!("<li>{}</li>", escape_html(example)))
-                        .collect::<Vec<_>>()
-                        .join("")
-                )
-            };
-            format!(
-                "<li><strong>{}</strong>: {}{}</li>",
-                escape_html(&item.category),
-                escape_html(&item.detail),
-                examples
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let suggestions = report
-        .suggestions
-        .iter()
-        .map(|item| {
-            format!(
-                "<li><strong>{}</strong>: {}</li>",
-                escape_html(&item.title),
-                escape_html(&item.detail)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let horizon = report
-        .on_the_horizon
-        .iter()
-        .map(|item| format!("<li>{}</li>", escape_html(item)))
-        .collect::<Vec<_>>()
-        .join("");
-    let evidence = report
-        .evidence
-        .iter()
-        .map(|item| format!("<li>{}</li>", escape_html(item)))
-        .collect::<Vec<_>>()
-        .join("");
-
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Codex Insights</title><style>body{{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;margin:40px auto;max-width:900px;padding:0 20px;line-height:1.6;color:#1f2937}}h1,h2{{color:#111827}}.meta{{color:#6b7280;margin-bottom:24px}}section{{margin:28px 0}}ul{{padding-left:20px}}.glance li{{margin:8px 0}}code{{background:#f3f4f6;padding:2px 6px;border-radius:6px}}</style></head><body><h1>Codex Insights</h1><div class=\"meta\">{} sessions scanned · {} analyzed · report generated at {}</div><section><h2>At a Glance</h2><ul class=\"glance\"><li><strong>What's working:</strong> {}</li><li><strong>What's hindering:</strong> {}</li><li><strong>Quick wins:</strong> {}</li><li><strong>Ambitious workflows:</strong> {}</li></ul></section><section><h2>What You Work On</h2><ul>{}</ul></section><section><h2>How You Use Codex</h2><p>{}</p></section><section><h2>What Works</h2><ul>{}</ul></section><section><h2>Where Things Go Wrong</h2><ul>{}</ul></section><section><h2>Suggestions</h2><ul>{}</ul></section><section><h2>On the Horizon</h2><ul>{}</ul></section><section><h2>Evidence</h2><ul>{}</ul></section></body></html>",
-        report.metadata.sessions_scanned,
-        report.metadata.sessions_analyzed,
-        escape_html(&report.metadata.generated_report_path),
-        escape_html(&report.at_a_glance.whats_working),
-        escape_html(&report.at_a_glance.whats_hindering),
-        escape_html(&report.at_a_glance.quick_wins),
-        escape_html(&report.at_a_glance.ambitious_workflows),
-        work_areas,
-        escape_html(&report.interaction_style.narrative),
-        what_works,
-        friction,
-        suggestions,
-        horizon,
-        evidence,
-    )
-}
-
-fn default_insights_report_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex")
-        .join("codex-threads")
-        .join("insights")
-        .join("report.html")
-}
-
-fn session_project_name(fact: &SessionFact) -> String {
-    fact.thread
-        .project_name
-        .clone()
-        .or_else(|| {
-            fact.thread
-                .cwd
-                .as_deref()
-                .and_then(|cwd| Path::new(cwd).file_name())
-                .and_then(|name| name.to_str())
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| "unknown".to_owned())
-}
+include!("insights.rs");
 
 fn summarize_event_stream(events: &[EventItem]) -> Vec<EventSummaryItem> {
     let mut summary = Vec::new();
@@ -2172,15 +306,17 @@ fn summarize_event_stream(events: &[EventItem]) -> Vec<EventSummaryItem> {
 
 fn summarize_event_item(event: &EventItem) -> Option<EventSummaryItem> {
     match (event.kind.as_str(), event.event_type.as_deref()) {
-        ("session_meta", _) => event
-            .payload
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(|cwd| EventSummaryItem {
-                timestamp: event.timestamp.clone(),
-                category: "session".to_owned(),
-                detail: format!("started in {cwd}"),
-            }),
+        ("session_meta", _) => {
+            event
+                .payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(|cwd| EventSummaryItem {
+                    timestamp: event.timestamp.clone(),
+                    category: "session".to_owned(),
+                    detail: format!("started in {cwd}"),
+                })
+        }
         ("event_msg", Some("user_message" | "agent_message")) => event
             .payload
             .get("message")
@@ -2202,10 +338,17 @@ fn summarize_event_item(event: &EventItem) -> Option<EventSummaryItem> {
 fn summarize_exec_command_end(event: &EventItem) -> Option<EventSummaryItem> {
     let payload = &event.payload;
     let command = extract_exec_command(payload).unwrap_or_else(|| "exec_command".to_owned());
-    let exit_code = payload.get("exit_code").and_then(Value::as_i64).unwrap_or(0);
+    let exit_code = payload
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let duration = format_duration(payload).unwrap_or_else(|| "unknown duration".to_owned());
     let mut detail = if exit_code == 0 {
-        format!("`{}` completed successfully in {}", one_line(&command, 120), duration)
+        format!(
+            "`{}` completed successfully in {}",
+            one_line(&command, 120),
+            duration
+        )
     } else {
         format!(
             "`{}` failed with exit code {} in {}",
@@ -2249,7 +392,10 @@ fn summarize_tool_call(event: &EventItem) -> Option<EventSummaryItem> {
     }
 
     let detail = if name == "apply_patch" {
-        let arguments = payload.get("arguments").and_then(Value::as_str).unwrap_or("");
+        let arguments = payload
+            .get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let targets = extract_patch_targets(arguments);
         if targets.is_empty() {
             "apply_patch".to_owned()
@@ -2832,8 +978,7 @@ fn is_substantive_message(text: &str) -> bool {
     }
     if matches!(
         normalized.as_str(),
-        "ok"
-            | "okay"
+        "ok" | "okay"
             | "可以"
             | "好的"
             | "推进"
@@ -2982,7 +1127,15 @@ fn build_insight_evidence(digest: &ThreadDigest) -> Vec<String> {
         );
     }
 
-    for action in digest.key_actions.iter().rev().take(3).collect::<Vec<_>>().into_iter().rev() {
+    for action in digest
+        .key_actions
+        .iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         push_unique(
             &mut evidence,
             format!("Execution: {}", one_line(&action.detail, 180)),
@@ -3008,7 +1161,8 @@ fn derive_next_steps(digest: &ThreadDigest, insights: &[String]) -> Vec<String> 
     if normalized.contains("insight") || normalized.contains("聊天记录") {
         push_unique(
             &mut next_steps,
-            "Add a recent-threads batch mode that generates one insight note per thread.".to_owned(),
+            "Add a recent-threads batch mode that generates one insight note per thread."
+                .to_owned(),
             4,
         );
     }
@@ -3019,7 +1173,10 @@ fn derive_next_steps(digest: &ThreadDigest, insights: &[String]) -> Vec<String> 
             4,
         );
     }
-    if insights.iter().any(|item| item.contains("interpretation layer")) {
+    if insights
+        .iter()
+        .any(|item| item.contains("interpretation layer"))
+    {
         push_unique(
             &mut next_steps,
             "Add optional frontmatter tags like project, theme, and outcome to make insights easier to archive.".to_owned(),
@@ -3104,9 +1261,15 @@ fn extract_exec_command(payload: &Value) -> Option<String> {
 
     let command = payload.get("command").and_then(Value::as_array)?;
     if command.len() >= 3
-        && command.get(1).and_then(Value::as_str).is_some_and(|part| part == "-lc")
+        && command
+            .get(1)
+            .and_then(Value::as_str)
+            .is_some_and(|part| part == "-lc")
     {
-        return command.get(2).and_then(Value::as_str).map(ToOwned::to_owned);
+        return command
+            .get(2)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
     }
 
     Some(
@@ -3293,7 +1456,9 @@ fn build_search_snippet(text: &str, query: &str, max_len: usize) -> String {
         end_char = (start_char + max_len).min(total_chars);
     }
 
-    let snippet = slice_chars(&compact, start_char, end_char).trim().to_owned();
+    let snippet = slice_chars(&compact, start_char, end_char)
+        .trim()
+        .to_owned();
     let prefix = if start_char > 0 { "…" } else { "" };
     let suffix = if end_char < total_chars { "…" } else { "" };
     format!("{prefix}{snippet}{suffix}")
@@ -3400,7 +1565,10 @@ mod tests {
             matches[0].summary.as_deref(),
             Some("build a CLI that searches Codex threads")
         );
-        assert_eq!(matches[0].snippet, "build a CLI that searches Codex threads");
+        assert_eq!(
+            matches[0].snippet,
+            "build a CLI that searches Codex threads"
+        );
 
         let threads = resolve_threads(&conn, "example-project", 10).unwrap();
         assert_eq!(threads.len(), 1);
@@ -3639,7 +1807,8 @@ mod tests {
             },
             objective: Some("build a CLI that searches Codex threads".to_owned()),
             key_requests: vec![
-                "我们测试一下这个cli，你利用这个cli读取我们最近的聊天看看有哪些可以改进的".to_owned(),
+                "我们测试一下这个cli，你利用这个cli读取我们最近的聊天看看有哪些可以改进的"
+                    .to_owned(),
             ],
             key_actions: vec![EventSummaryItem {
                 timestamp: Some("2026-04-13T05:00:06Z".to_owned()),
@@ -3647,8 +1816,7 @@ mod tests {
                 detail: "`messages search` completed successfully in 585ms".to_owned(),
             }],
             outcome: Some(
-                "现在效果明显比上一版对了，messages search 已经改成 snippet-first。"
-                    .to_owned(),
+                "现在效果明显比上一版对了，messages search 已经改成 snippet-first。".to_owned(),
             ),
         };
 
@@ -3664,7 +1832,10 @@ mod tests {
             thread: ThreadSummary {
                 thread_id: thread_id.to_owned(),
                 path: format!("/tmp/{thread_id}.jsonl"),
-                started_at: Some(format!("2026-04-13T05:00:0{}Z", thread_id.chars().last().unwrap_or('0'))),
+                started_at: Some(format!(
+                    "2026-04-13T05:00:0{}Z",
+                    thread_id.chars().last().unwrap_or('0')
+                )),
                 cwd: Some(format!("/tmp/{project}")),
                 project_name: Some(project.to_owned()),
                 summary: Some(objective.to_owned()),
@@ -3689,6 +1860,12 @@ mod tests {
             command_successes: 1,
             command_failures: 0,
         }
+    }
+
+    fn sample_analysis(thread_id: &str, project: &str, objective: &str) -> SessionAnalysis {
+        let fact = sample_fact(thread_id, project, objective);
+        let facets = build_session_facets(&fact);
+        SessionAnalysis { fact, facets }
     }
 
     #[test]
@@ -3723,12 +1900,12 @@ mod tests {
 
     #[test]
     fn select_insight_facts_round_robins_projects_for_global_reports() {
-        let facts = vec![
-            sample_fact("1", "mnemo", "mnemo one"),
-            sample_fact("2", "mnemo", "mnemo two"),
-            sample_fact("3", "opensource", "open one"),
-            sample_fact("4", "mnemo", "mnemo three"),
-            sample_fact("5", "physedit", "phys one"),
+        let analyses = vec![
+            sample_analysis("1", "mnemo", "mnemo one"),
+            sample_analysis("2", "mnemo", "mnemo two"),
+            sample_analysis("3", "opensource", "open one"),
+            sample_analysis("4", "mnemo", "mnemo three"),
+            sample_analysis("5", "physedit", "phys one"),
         ];
         let args = InsightsArgs {
             limit: 4,
@@ -3738,10 +1915,10 @@ mod tests {
             max_message_chars: 1600,
         };
 
-        let selected = select_insight_facts(facts, &args);
+        let selected = select_insight_analyses(analyses, &args);
         let projects = selected
             .iter()
-            .map(session_project_name)
+            .map(|analysis| session_project_name(&analysis.fact))
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -3757,9 +1934,120 @@ mod tests {
 
     #[test]
     fn build_global_evidence_includes_user_requests() {
-        let evidence = build_global_evidence(&[sample_fact("1", "mnemo", "plan mnemo")]);
+        let evidence = build_global_evidence(&[sample_analysis("1", "mnemo", "plan mnemo")]);
 
-        assert!(evidence.iter().any(|item| item.starts_with("User request:")));
-        assert!(evidence.iter().any(|item| item.starts_with("Session objective:")));
+        assert!(evidence.iter().any(|item| item.detail.contains("Request:")));
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item.title.contains("plan mnemo"))
+        );
+    }
+
+    #[test]
+    fn build_session_facets_classifies_mode_and_signals() {
+        let mut fact = sample_fact(
+            "9",
+            "codex-threads",
+            "fix failing cargo test in insights html",
+        );
+        fact.outcome = None;
+        fact.command_failures = 2;
+        fact.command_successes = 0;
+        fact.key_actions = vec![EventSummaryItem {
+            timestamp: Some("2026-04-13T05:00:06Z".to_owned()),
+            category: "error".to_owned(),
+            detail: "`cargo test` failed with exit code 101 in 2.3s: assertion failed".to_owned(),
+        }];
+
+        let facets = build_session_facets(&fact);
+        assert_eq!(facets.primary_mode, SessionMode::Debugging);
+        assert!(
+            facets
+                .friction_signals
+                .iter()
+                .any(|item| item == "Execution friction")
+        );
+        assert_eq!(facets.outcome_strength, OutcomeStrength::Weak);
+    }
+
+    #[test]
+    fn aggregate_session_facets_clusters_cross_project_patterns() {
+        let mut a = sample_analysis("1", "mnemo", "implement insights html cards");
+        a.fact.cleaned_context_messages = 1;
+        a.fact.command_failures = 1;
+        a.facets = build_session_facets(&a.fact);
+
+        let mut b = sample_analysis("2", "opensource", "fix failing report renderer");
+        b.fact.command_failures = 1;
+        b.fact.outcome = None;
+        b.facets = build_session_facets(&b.fact);
+
+        let c = sample_analysis("3", "mnemo", "plan handoff for insight parity");
+        let d = sample_analysis("4", "physedit", "review regression risks in search");
+
+        let aggregated = aggregate_session_facets(&[a, b, c, d]);
+        assert_eq!(aggregated.active_projects[0].name, "mnemo");
+        assert!(
+            aggregated
+                .recurring_frictions
+                .iter()
+                .any(|item| item.label == "Execution friction" && item.count >= 2)
+        );
+        assert!(!aggregated.dominant_modes.is_empty());
+    }
+
+    #[test]
+    fn generate_insights_html_escapes_and_renders_navigation() {
+        let aggregated = aggregate_session_facets(&[
+            sample_analysis("1", "mnemo", "plan <script> report"),
+            sample_analysis("2", "opensource", "implement html cards"),
+        ]);
+        let work_areas = build_work_areas(&aggregated);
+        let interaction_style = build_interaction_style(&aggregated, &work_areas);
+        let what_works = build_what_works(&aggregated, &work_areas);
+        let friction = build_friction_cards(&aggregated);
+        let suggestions = build_suggestion_cards(&aggregated, &work_areas, &friction);
+        let on_the_horizon = build_horizon_items(&aggregated, &work_areas);
+        let evidence = vec![EvidenceItem {
+            title: "plan <script> report".to_owned(),
+            detail: "Request: tighten <b>html</b> report".to_owned(),
+            project: "mnemo&co".to_owned(),
+            mode: "Planning".to_owned(),
+            themes: vec!["Reporting & insights".to_owned()],
+        }];
+        let report = InsightsReport {
+            metadata: InsightsMetadata {
+                sessions_scanned: 7,
+                sessions_analyzed: 2,
+                project_filter: None,
+                generated_report_path: "/tmp/report&<test>.html".to_owned(),
+            },
+            aggregated,
+            at_a_glance: build_at_a_glance(
+                &aggregate_session_facets(&[
+                    sample_analysis("1", "mnemo", "plan <script> report"),
+                    sample_analysis("2", "opensource", "implement html cards"),
+                ]),
+                &work_areas,
+                &interaction_style,
+                &friction,
+                &suggestions,
+            ),
+            work_areas,
+            interaction_style,
+            what_works,
+            friction,
+            suggestions,
+            on_the_horizon,
+            evidence,
+            content: String::new(),
+        };
+
+        let html = generate_insights_html(&report);
+        assert!(html.contains("id=\"section-friction\""));
+        assert!(html.contains("href=\"#section-friction\""));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("/tmp/report&amp;&lt;test&gt;.html"));
     }
 }
