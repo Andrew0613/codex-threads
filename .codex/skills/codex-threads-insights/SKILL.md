@@ -1,6 +1,6 @@
 ---
 name: codex-threads-insights
-description: Generate Codex usage insight reports from the codex-threads CLI, using `--json insights` and `data.briefing` as the primary source of truth.
+description: Generate Codex usage insight reports from the codex-threads CLI, using `--json insights` with `data.source_contract`, `data.trace`, and `data.briefing` as the canonical truth layers.
 ---
 
 # codex-threads-insights
@@ -11,7 +11,7 @@ This skill is for the report-writing workflow, not thread lookup. If you need to
 
 ## Truth Source
 
-Use `--json insights` and treat `data.trace` plus `data.briefing` as the canonical backend payload.
+Use `--json insights` and treat `data.source_contract`, `data.trace`, and `data.briefing` as the canonical backend payload.
 
 - Prefer:
   - `data.source_contract`
@@ -25,6 +25,7 @@ Use `--json insights` and treat `data.trace` plus `data.briefing` as the canonic
 - `data.metadata` and `data.aggregated` are derived overview fields from the same run. They are safe for quick summaries and cross-checks, but they are not the primary evidence layer.
 - Treat `data.heuristic_draft` as a heuristic draft only.
 - Do not use `example_sessions.len()` as the analyzed-session denominator; use `sessions_analyzed`.
+- Do not assume evidence coverage is exhaustive; confirm `data.trace.canonical_receipt.evidence_item_count`, `evidence_item_cap`, and the actual `evidence_ids` present in this payload.
 
 ## Default Flow
 
@@ -63,6 +64,7 @@ cargo run -- --json insights --project <project-name> --limit 20
    - valid recurring success labels
    - current analyzed-session denominator
    - whether `example_sessions` is sample-only and what the current sample cap is
+   - whether `evidence` is sample-only and what the current evidence cap is
 3. Read `data.briefing` for the actual fact layer.
 4. Use `data.metadata` and `data.aggregated` only for overview/cross-check purposes.
 5. Only after the narrative is already formed, optionally read `data.heuristic_draft` for wording ideas.
@@ -95,6 +97,7 @@ cargo run -- --json insights --project <project-name> --limit 20
 - Do not hide uncertainty when `Low execution evidence` or `Context overload` is high.
 - Do not overfit on one active project if the analyzed set spans several projects.
 - Do not cite any evidence id that is not present in `data.trace.canonical_receipt.evidence_ids`.
+- Do not assume every analyzed session has canonical evidence coverage; confirm `evidence_item_count` and `evidence_item_cap` before generalizing from `briefing.evidence`.
 - Do not cite any recurring pattern that is not present in `data.trace`.
 - Do not assume `example_sessions` is exhaustive; confirm `data.trace.canonical_receipt.example_sessions_are_samples` and use `example_session_cap` only as display metadata.
 - Do not treat `example_sessions` as the full analyzed set; they are display samples only.

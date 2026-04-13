@@ -2186,12 +2186,19 @@ mod tests {
             briefing.summary.example_session_cap,
             EXAMPLE_SESSION_SAMPLE_CAP
         );
+        assert!(!briefing.summary.evidence_items_are_samples);
+        assert_eq!(briefing.summary.evidence_item_count, 3);
+        assert_eq!(
+            briefing.summary.evidence_item_cap,
+            EXAMPLE_SESSION_SAMPLE_CAP
+        );
         assert_eq!(
             briefing.patterns.active_projects.len(),
             aggregated.active_projects.len()
         );
         assert!(!briefing.modeling_notes.is_empty());
         assert!(!briefing.uncertainties.is_empty());
+        assert!(briefing.modeling_notes[0].contains("data.heuristic_draft.content"));
         assert!(
             briefing
                 .patterns
@@ -2255,6 +2262,10 @@ mod tests {
 
         assert_eq!(
             json["source_contract"]["canonical_sources"][0],
+            "data.source_contract"
+        );
+        assert_eq!(
+            json["source_contract"]["canonical_sources"][1],
             "data.trace"
         );
         assert_eq!(
@@ -2273,11 +2284,15 @@ mod tests {
             json["trace"]["canonical_receipt"]["example_session_cap"],
             EXAMPLE_SESSION_SAMPLE_CAP as u64
         );
+        assert_eq!(
+            json["trace"]["canonical_receipt"]["evidence_item_cap"],
+            EXAMPLE_SESSION_SAMPLE_CAP as u64
+        );
         assert!(
             json["source_contract"]["source_notes"][0]
                 .as_str()
                 .expect("source note")
-                .contains("derived")
+                .contains("machine-readable contract")
         );
         assert!(json["heuristic_draft"].is_object());
     }
@@ -2320,6 +2335,8 @@ mod tests {
             report.aggregated.example_sessions.len()
         );
         assert_eq!(receipt.example_session_cap, EXAMPLE_SESSION_SAMPLE_CAP);
+        assert_eq!(receipt.evidence_item_count, report.briefing.evidence.len());
+        assert_eq!(receipt.evidence_item_cap, EXAMPLE_SESSION_SAMPLE_CAP);
         assert_eq!(
             receipt
                 .evidence_ids
@@ -2343,6 +2360,60 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             friction_labels
+        );
+    }
+
+    #[test]
+    fn canonical_receipt_discloses_evidence_sampling_and_preserves_example_linkage() {
+        let analyses = (0..10)
+            .map(|index| {
+                sample_analysis(
+                    &(index + 1).to_string(),
+                    if index % 2 == 0 {
+                        "mnemo"
+                    } else {
+                        "opensource"
+                    },
+                    &format!("session {}", index + 1),
+                )
+            })
+            .collect::<Vec<_>>();
+        let report =
+            build_global_insights_report(&analyses, 22, None, Path::new("/tmp/report.html"));
+        let receipt = &report.trace.canonical_receipt;
+        let evidence_ids = report
+            .briefing
+            .evidence
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(receipt.example_sessions_are_samples);
+        assert!(receipt.evidence_items_are_samples);
+        assert_eq!(receipt.example_session_count, EXAMPLE_SESSION_SAMPLE_CAP);
+        assert_eq!(receipt.evidence_item_count, EXAMPLE_SESSION_SAMPLE_CAP);
+        assert_eq!(receipt.evidence_item_cap, EXAMPLE_SESSION_SAMPLE_CAP);
+        assert_eq!(
+            receipt
+                .evidence_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            evidence_ids
+        );
+        assert!(
+            report
+                .briefing
+                .example_sessions
+                .iter()
+                .all(|session| !session.evidence_ids.is_empty())
+        );
+        assert!(
+            report
+                .briefing
+                .uncertainties
+                .iter()
+                .any(|item| item.contains("Evidence items are also capped"))
         );
     }
 }

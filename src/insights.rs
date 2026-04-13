@@ -108,6 +108,9 @@ struct BriefingSummary {
     example_sessions_are_samples: bool,
     example_session_count: usize,
     example_session_cap: usize,
+    evidence_items_are_samples: bool,
+    evidence_item_count: usize,
+    evidence_item_cap: usize,
     project_filter: Option<String>,
     dominant_project: Option<String>,
     dominant_mode: Option<String>,
@@ -158,6 +161,9 @@ struct CanonicalReceipt {
     example_sessions_are_samples: bool,
     example_session_count: usize,
     example_session_cap: usize,
+    evidence_items_are_samples: bool,
+    evidence_item_count: usize,
+    evidence_item_cap: usize,
     dominant_project: Option<String>,
     dominant_mode: Option<String>,
     recurring_theme_labels: Vec<String>,
@@ -1634,6 +1640,7 @@ fn build_global_insights_report(
 fn build_source_contract() -> SourceContract {
     SourceContract {
         canonical_sources: vec![
+            "data.source_contract".to_owned(),
             "data.trace".to_owned(),
             "data.briefing.summary".to_owned(),
             "data.briefing.patterns".to_owned(),
@@ -1651,7 +1658,9 @@ fn build_source_contract() -> SourceContract {
             "data.heuristic_draft.content".to_owned(),
         ],
         consumption_order: vec![
-            "Read `data.trace` first to lock the current payload receipt and valid evidence ids."
+            "Read `data.source_contract` first to understand which payload sections are canonical, derived, or heuristic."
+                .to_owned(),
+            "Read `data.trace` next to lock the current payload receipt, valid evidence ids, and sample semantics."
                 .to_owned(),
             "Use `data.briefing` as the canonical fact layer for counts, patterns, evidence, and uncertainty."
                 .to_owned(),
@@ -1661,6 +1670,8 @@ fn build_source_contract() -> SourceContract {
                 .to_owned(),
         ],
         source_notes: vec![
+            "`data.source_contract` is the machine-readable contract for interpreting the rest of the payload."
+                .to_owned(),
             "`data.metadata` and `data.aggregated` are derived from the same analysis pass as `data.trace` and `data.briefing`."
                 .to_owned(),
             "You may use derived overview fields for quick summaries or cross-checks, but evidence ids, pattern labels, and denominators should still come from `data.trace` and `data.briefing`."
@@ -1697,6 +1708,9 @@ fn build_insights_briefing(
             example_sessions_are_samples: true,
             example_session_count: example_sessions.len(),
             example_session_cap: EXAMPLE_SESSION_SAMPLE_CAP,
+            evidence_items_are_samples: evidence.len() < metadata.sessions_analyzed,
+            evidence_item_count: evidence.len(),
+            evidence_item_cap: EXAMPLE_SESSION_SAMPLE_CAP,
             project_filter: metadata.project_filter.clone(),
             dominant_project,
             dominant_mode,
@@ -1720,7 +1734,7 @@ fn build_insights_briefing(
         example_sessions: example_sessions.to_vec(),
         uncertainties,
         modeling_notes: vec![
-            "Use recurring patterns and evidence as the source of truth; treat the human-facing `content` field as a heuristic draft, not canonical analysis.".to_owned(),
+            "Use recurring patterns and evidence as the source of truth; treat `data.heuristic_draft.content` as a heuristic draft, not canonical analysis.".to_owned(),
             "Prefer project/mode/theme clusters over raw tool frequency when writing narrative sections.".to_owned(),
             "Call out uncertainty explicitly when low-execution-evidence or context-overload signals are high.".to_owned(),
         ],
@@ -1750,6 +1764,9 @@ fn build_insights_trace(
             example_sessions_are_samples: true,
             example_session_count: aggregated.example_sessions.len(),
             example_session_cap: EXAMPLE_SESSION_SAMPLE_CAP,
+            evidence_items_are_samples: evidence.len() < metadata.sessions_analyzed,
+            evidence_item_count: evidence.len(),
+            evidence_item_cap: EXAMPLE_SESSION_SAMPLE_CAP,
             dominant_project: aggregated.active_projects.first().map(|item| item.name.clone()),
             dominant_mode: aggregated.dominant_modes.first().map(|item| item.label.clone()),
             recurring_theme_labels: aggregated
@@ -1821,6 +1838,12 @@ fn build_briefing_uncertainties(
     if aggregated.example_sessions.len() < metadata.sessions_analyzed {
         uncertainties.push(format!(
             "Example sessions are capped at {} items for display; use `sessions_analyzed` as the real denominator for narrative claims.",
+            EXAMPLE_SESSION_SAMPLE_CAP
+        ));
+    }
+    if aggregated.analyzed_session_count > EXAMPLE_SESSION_SAMPLE_CAP {
+        uncertainties.push(format!(
+            "Evidence items are also capped at {} sampled sessions for display and linkage; use `data.trace.canonical_receipt.evidence_ids` to confirm which evidence ids are present in this payload.",
             EXAMPLE_SESSION_SAMPLE_CAP
         ));
     }
@@ -3008,7 +3031,7 @@ fn build_horizon_items(
 fn build_global_evidence(analyses: &[SessionAnalysis]) -> Vec<EvidenceItem> {
     analyses
         .iter()
-        .take(6)
+        .take(EXAMPLE_SESSION_SAMPLE_CAP)
         .enumerate()
         .map(|(index, analysis)| {
             let fact = &analysis.fact;
