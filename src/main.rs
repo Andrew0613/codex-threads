@@ -2050,4 +2050,37 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("/tmp/report&amp;&lt;test&gt;.html"));
     }
+
+    #[test]
+    fn at_a_glance_uses_full_analysis_count_not_example_sample() {
+        let analyses = (0..12)
+            .map(|index| {
+                sample_analysis(
+                    &(index + 1).to_string(),
+                    if index % 2 == 0 {
+                        "mnemo"
+                    } else {
+                        "opensource"
+                    },
+                    &format!("implement insights flow {index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let aggregated = aggregate_session_facets(&analyses);
+        let work_areas = build_work_areas(&aggregated);
+        let interaction_style = build_interaction_style(&aggregated, &work_areas);
+        let friction = build_friction_cards(&aggregated);
+        let suggestions = build_suggestion_cards(&aggregated, &work_areas, &friction);
+        let glance = build_at_a_glance(
+            &aggregated,
+            &work_areas,
+            &interaction_style,
+            &friction,
+            &suggestions,
+        );
+
+        assert_eq!(aggregated.analyzed_session_count, 12);
+        assert_eq!(aggregated.example_sessions.len(), 8);
+        assert!(glance.whats_working.contains("12 analyzed sessions"));
+    }
 }

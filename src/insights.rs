@@ -91,6 +91,7 @@ struct ExampleSession {
 
 #[derive(Debug, Clone, Serialize)]
 struct AggregatedInsightsData {
+    analyzed_session_count: usize,
     active_projects: Vec<AggregatedProject>,
     dominant_modes: Vec<LabeledCount>,
     recurring_themes: Vec<LabeledCount>,
@@ -1583,6 +1584,7 @@ fn aggregate_session_facets(analyses: &[SessionAnalysis]) -> AggregatedInsightsD
     });
 
     AggregatedInsightsData {
+        analyzed_session_count: analyses.len(),
         active_projects,
         dominant_modes: sorted_counts(&mode_counts, 6),
         recurring_themes: sorted_counts(&theme_counts, 8),
@@ -2136,7 +2138,7 @@ fn build_interaction_style(
     aggregated: &AggregatedInsightsData,
     work_areas: &[WorkArea],
 ) -> InteractionStyle {
-    let total = aggregated.example_sessions.len().max(1);
+    let total = aggregated.analyzed_session_count.max(1);
     let dominant_mode = aggregated
         .dominant_modes
         .first()
@@ -2208,7 +2210,7 @@ fn build_what_works(
     aggregated: &AggregatedInsightsData,
     work_areas: &[WorkArea],
 ) -> Vec<InsightCard> {
-    let total = aggregated.example_sessions.len().max(1);
+    let total = aggregated.analyzed_session_count.max(1);
     let mut cards = aggregated
         .recurring_success_patterns
         .iter()
@@ -2398,7 +2400,7 @@ fn build_at_a_glance(
     friction: &[FrictionCard],
     suggestions: &[SuggestionCard],
 ) -> AtAGlance {
-    let total = aggregated.example_sessions.len().max(1);
+    let total = aggregated.analyzed_session_count.max(1);
     let dominant_area = work_areas
         .first()
         .map(|area| area.name.as_str())
