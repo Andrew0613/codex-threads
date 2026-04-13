@@ -97,6 +97,7 @@ cargo run -- --json insights --project <project-name> --limit 20
 - Do not hide uncertainty when `Low execution evidence` or `Context overload` is high.
 - Do not overfit on one active project if the analyzed set spans several projects.
 - Do not cite any evidence id that is not present in `data.trace.canonical_receipt.evidence_ids`.
+- Treat evidence ids as thread-bound identifiers from the current payload, not positional ranks.
 - Do not assume every analyzed session has canonical evidence coverage; confirm `evidence_item_count` and `evidence_item_cap` before generalizing from `briefing.evidence`.
 - Do not cite any recurring pattern that is not present in `data.trace`.
 - Do not assume `example_sessions` is exhaustive; confirm `data.trace.canonical_receipt.example_sessions_are_samples` and use `example_session_cap` only as display metadata.

@@ -1411,7 +1411,7 @@ fn candidate_threads_for_insights(
         SELECT thread_id, path, started_at, cwd, project_name, summary, originator, cli_version, model_provider, agent_nickname, agent_role, message_count, event_count
         FROM threads
         WHERE (?1 IS NULL OR lower(COALESCE(project_name, '')) = ?1)
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, thread_id DESC
         LIMIT ?2
         "#,
     )?;
@@ -3032,8 +3032,7 @@ fn build_global_evidence(analyses: &[SessionAnalysis]) -> Vec<EvidenceItem> {
     analyses
         .iter()
         .take(EXAMPLE_SESSION_SAMPLE_CAP)
-        .enumerate()
-        .map(|(index, analysis)| {
+        .map(|analysis| {
             let fact = &analysis.fact;
             let facets = &analysis.facets;
             let title = fact
@@ -3053,7 +3052,7 @@ fn build_global_evidence(analyses: &[SessionAnalysis]) -> Vec<EvidenceItem> {
             }
 
             EvidenceItem {
-                id: format!("evidence-{}", index + 1),
+                id: stable_evidence_id(&fact.thread.thread_id),
                 thread_id: fact.thread.thread_id.clone(),
                 title: one_line(&title, 96),
                 detail: parts.join(" "),
@@ -3064,6 +3063,10 @@ fn build_global_evidence(analyses: &[SessionAnalysis]) -> Vec<EvidenceItem> {
             }
         })
         .collect()
+}
+
+fn stable_evidence_id(thread_id: &str) -> String {
+    format!("evidence-{thread_id}")
 }
 
 fn evidence_confidence(fact: &SessionFact, facets: &SessionFacets) -> &'static str {

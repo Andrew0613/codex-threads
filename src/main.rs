@@ -1942,6 +1942,36 @@ mod tests {
                 .iter()
                 .any(|item| item.title.contains("plan mnemo"))
         );
+        assert_eq!(evidence[0].id, stable_evidence_id("1"));
+    }
+
+    #[test]
+    fn build_global_evidence_uses_thread_bound_stable_ids() {
+        let analyses = vec![
+            sample_analysis(
+                "019d8624-895f-7700-ad9f-1309317e8a2c",
+                "mnemo",
+                "plan mnemo",
+            ),
+            sample_analysis(
+                "019d85a8-f1ba-7d12-981a-bd0cc773b4c4",
+                "opensource",
+                "trace receipt",
+            ),
+        ];
+
+        let evidence = build_global_evidence(&analyses);
+
+        assert_eq!(
+            evidence
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "evidence-019d8624-895f-7700-ad9f-1309317e8a2c",
+                "evidence-019d85a8-f1ba-7d12-981a-bd0cc773b4c4",
+            ]
+        );
     }
 
     #[test]
@@ -2022,7 +2052,7 @@ mod tests {
         let suggestions = build_suggestion_cards(&aggregated, &work_areas, &friction);
         let on_the_horizon = build_horizon_items(&aggregated, &work_areas);
         let evidence = vec![EvidenceItem {
-            id: "evidence-1".to_owned(),
+            id: stable_evidence_id("1"),
             thread_id: "1".to_owned(),
             title: "plan <script> report".to_owned(),
             detail: "Request: tighten <b>html</b> report".to_owned(),
@@ -2054,7 +2084,7 @@ mod tests {
                     outcome: None,
                     outcome_strength: "Partial outcome".to_owned(),
                     outcome_confidence: "medium".to_owned(),
-                    evidence_ids: vec!["evidence-1".to_owned()],
+                    evidence_ids: vec![stable_evidence_id("1")],
                     classification_notes: vec![
                         "Mode classified from planning keywords.".to_owned(),
                     ],
@@ -2414,6 +2444,69 @@ mod tests {
                 .uncertainties
                 .iter()
                 .any(|item| item.contains("Evidence items are also capped"))
+        );
+    }
+
+    #[test]
+    fn candidate_threads_for_insights_breaks_timestamp_ties_with_thread_id() {
+        let conn = Connection::open_in_memory().expect("open db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE threads (
+                thread_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                started_at TEXT,
+                cwd TEXT,
+                project_name TEXT,
+                summary TEXT,
+                originator TEXT,
+                cli_version TEXT,
+                model_provider TEXT,
+                agent_nickname TEXT,
+                agent_role TEXT,
+                message_count INTEGER NOT NULL,
+                event_count INTEGER NOT NULL
+            );
+            "#,
+        )
+        .expect("create threads table");
+        for thread_id in ["thread-a", "thread-b"] {
+            conn.execute(
+                r#"
+                INSERT INTO threads (
+                    thread_id, path, started_at, cwd, project_name, summary,
+                    originator, cli_version, model_provider, agent_nickname,
+                    agent_role, message_count, event_count
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, NULL, 1, 1)
+                "#,
+                params![
+                    thread_id,
+                    format!("/tmp/{thread_id}.jsonl"),
+                    "2026-04-13T05:00:00Z",
+                    "/tmp/opensource",
+                    "opensource",
+                    format!("summary for {thread_id}")
+                ],
+            )
+            .expect("insert thread");
+        }
+
+        let args = InsightsArgs {
+            limit: 2,
+            project: None,
+            output: None,
+            event_limit: 120,
+            max_message_chars: 1600,
+        };
+
+        let threads = candidate_threads_for_insights(&conn, &args).expect("candidate threads");
+
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thread-b", "thread-a"]
         );
     }
 }
