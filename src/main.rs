@@ -2258,12 +2258,26 @@ mod tests {
             "data.trace"
         );
         assert_eq!(
+            json["source_contract"]["derived_overview_sources"][0],
+            "data.metadata"
+        );
+        assert_eq!(
+            json["source_contract"]["derived_overview_sources"][1],
+            "data.aggregated"
+        );
+        assert_eq!(
             json["trace"]["canonical_receipt"]["example_sessions_are_samples"],
             true
         );
         assert_eq!(
             json["trace"]["canonical_receipt"]["example_session_cap"],
             EXAMPLE_SESSION_SAMPLE_CAP as u64
+        );
+        assert!(
+            json["source_contract"]["source_notes"][0]
+                .as_str()
+                .expect("source note")
+                .contains("derived")
         );
         assert!(json["heuristic_draft"].is_object());
     }

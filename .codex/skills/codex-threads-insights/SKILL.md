@@ -22,6 +22,7 @@ Use `--json insights` and treat `data.trace` plus `data.briefing` as the canonic
   - `data.briefing.example_sessions`
   - `data.briefing.uncertainties`
   - `data.briefing.modeling_notes`
+- `data.metadata` and `data.aggregated` are derived overview fields from the same run. They are safe for quick summaries and cross-checks, but they are not the primary evidence layer.
 - Treat `data.heuristic_draft` as a heuristic draft only.
 - Do not use `example_sessions.len()` as the analyzed-session denominator; use `sessions_analyzed`.
 
@@ -63,7 +64,8 @@ cargo run -- --json insights --project <project-name> --limit 20
    - current analyzed-session denominator
    - whether `example_sessions` is sample-only and what the current sample cap is
 3. Read `data.briefing` for the actual fact layer.
-4. Only after the narrative is already formed, optionally read `data.heuristic_draft` for wording ideas.
+4. Use `data.metadata` and `data.aggregated` only for overview/cross-check purposes.
+5. Only after the narrative is already formed, optionally read `data.heuristic_draft` for wording ideas.
 
 ## How To Write The Report
 
@@ -73,6 +75,7 @@ cargo run -- --json insights --project <project-name> --limit 20
 - Use `pattern.evidence_ids` to connect narrative claims back to `evidence`.
 - Keep quoted evidence short; summarize long transcript fragments instead of repeating them.
 - If `data.heuristic_draft` conflicts with `data.trace` or `data.briefing`, trust `data.trace` and `data.briefing`.
+- If `data.metadata` or `data.aggregated` appears to disagree with `data.trace` or `data.briefing`, trust `data.trace` and `data.briefing`.
 
 ## Recommended Sections
 
@@ -95,3 +98,4 @@ cargo run -- --json insights --project <project-name> --limit 20
 - Do not cite any recurring pattern that is not present in `data.trace`.
 - Do not assume `example_sessions` is exhaustive; confirm `data.trace.canonical_receipt.example_sessions_are_samples` and use `example_session_cap` only as display metadata.
 - Do not treat `example_sessions` as the full analyzed set; they are display samples only.
+- Do not treat `data.aggregated` as a substitute for evidence linkage; use it for summary/cross-check only.

@@ -145,8 +145,10 @@ struct InsightsBriefing {
 #[derive(Debug, Clone, Serialize)]
 struct SourceContract {
     canonical_sources: Vec<String>,
+    derived_overview_sources: Vec<String>,
     noncanonical_sources: Vec<String>,
     consumption_order: Vec<String>,
+    source_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1640,6 +1642,10 @@ fn build_source_contract() -> SourceContract {
             "data.briefing.uncertainties".to_owned(),
             "data.briefing.modeling_notes".to_owned(),
         ],
+        derived_overview_sources: vec![
+            "data.metadata".to_owned(),
+            "data.aggregated".to_owned(),
+        ],
         noncanonical_sources: vec![
             "data.heuristic_draft".to_owned(),
             "data.heuristic_draft.content".to_owned(),
@@ -1649,7 +1655,17 @@ fn build_source_contract() -> SourceContract {
                 .to_owned(),
             "Use `data.briefing` as the canonical fact layer for counts, patterns, evidence, and uncertainty."
                 .to_owned(),
+            "Use `data.metadata` and `data.aggregated` only as derived overview/cross-check helpers from the same run, not as the primary evidence layer."
+                .to_owned(),
             "Use `data.heuristic_draft` only as a wording/reference draft after the canonical narrative is already formed."
+                .to_owned(),
+        ],
+        source_notes: vec![
+            "`data.metadata` and `data.aggregated` are derived from the same analysis pass as `data.trace` and `data.briefing`."
+                .to_owned(),
+            "You may use derived overview fields for quick summaries or cross-checks, but evidence ids, pattern labels, and denominators should still come from `data.trace` and `data.briefing`."
+                .to_owned(),
+            "If a derived overview field appears to conflict with the canonical fact layer, trust `data.trace` and `data.briefing`."
                 .to_owned(),
         ],
     }
